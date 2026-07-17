@@ -590,6 +590,152 @@ func TestGenerateImageReturnsWhenEveryCredentialRefreshFails(t *testing.T) {
 	}
 }
 
+func TestGenerateImageFallsAcrossProvidersAfterFinal429(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "image-cross-provider-429.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	// Candidate order is Build → Web → Console; first must fail so hop is exercised.
+	buildAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-image-429", SourceKey: "build-image-429",
+		EncryptedAccessToken: "build-token", ExpiresAt: time.Now().Add(time.Hour), Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	webAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web-image-ok", SourceKey: "web-image-ok",
+		EncryptedAccessToken: "web-token", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{
+		{PublicID: "grok-shared-image", Provider: account.ProviderBuild, UpstreamModel: "grok-shared-image", Capability: modeldomain.CapabilityImage, Enabled: true},
+		{PublicID: "grok-shared-image", Provider: account.ProviderWeb, UpstreamModel: "grok-shared-image", Capability: modeldomain.CapabilityImage, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-shared-image"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, webAccount.ID, []string{"grok-shared-image"}, now); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "image-hop-key", Prefix: "imgh", SecretHash: strings.Repeat("c", 64), EncryptedSecret: "encrypted-key",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildAdapter := &imageRateLimitAdapter{}
+	webAdapter := &imageSuccessAdapter{}
+	registry := provider.NewRegistry(buildAdapter, webAdapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	// maxAttempts=1 forces the final-attempt 429 path (no intra-route account retry budget left).
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+	result, err := service.GenerateImage(ctx, ImageGenerationInput{
+		RequestID: "req-image-cross-429", ClientKey: key, PublicModel: "grok-shared-image",
+		Prompt: "hop please", Count: 1, ResponseFormat: "url",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Finalize(Usage{}, "", "")
+	_ = result.Body.Close()
+	if result.StatusCode != http.StatusOK || string(body) != "web-image-ok" {
+		t.Fatalf("status=%d body=%q", result.StatusCode, body)
+	}
+	if !buildAdapter.called.Load() {
+		t.Fatal("build image adapter was not attempted")
+	}
+	if !webAdapter.called.Load() {
+		t.Fatal("web image adapter was not attempted after final 429")
+	}
+}
+
+type imageRateLimitAdapter struct {
+	called atomic.Bool
+}
+
+func (a *imageRateLimitAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (a *imageRateLimitAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider: account.ProviderBuild, ModelNamespace: account.ProviderBuild.ModelNamespace(),
+		Credential:        provider.CredentialSurface{AuthType: account.AuthTypeOAuth, Refresh: true},
+		Media:             provider.MediaSurface{ImageGeneration: true},
+		ModelCapabilities: []modeldomain.Capability{modeldomain.CapabilityImage},
+		Quota:             provider.QuotaBilling,
+	}
+}
+func (a *imageRateLimitAdapter) GenerateImage(context.Context, provider.ImageGenerationRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	header := make(http.Header)
+	header.Set("Retry-After", "3600")
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: header,
+		Body: io.NopCloser(strings.NewReader(`{"error":"build image limited"}`)),
+	}, nil
+}
+func (a *imageRateLimitAdapter) GetBilling(context.Context, account.Credential) (account.Billing, error) {
+	return account.Billing{}, nil
+}
+func (a *imageRateLimitAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {
+	return provider.RefreshedCredential{}, nil
+}
+
+type imageSuccessAdapter struct {
+	called atomic.Bool
+}
+
+func (a *imageSuccessAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (a *imageSuccessAdapter) Definition() provider.Definition {
+	definition := testConversationDefinition(account.ProviderWeb)
+	definition.Media.ImageGeneration = true
+	definition.ModelCapabilities = []modeldomain.Capability{modeldomain.CapabilityImage}
+	return definition
+}
+func (a *imageSuccessAdapter) QuotaMode(string) string { return "fast" }
+func (a *imageSuccessAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+}
+func (a *imageSuccessAdapter) GenerateImage(context.Context, provider.ImageGenerationRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader("web-image-ok")), QuotaUnits: 1,
+	}, nil
+}
+func (a *imageSuccessAdapter) SyncQuota(context.Context, account.Credential) (provider.QuotaSnapshot, error) {
+	return provider.QuotaSnapshot{}, nil
+}
+func (a *imageSuccessAdapter) SyncQuotaMode(_ context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
+	now := time.Now().UTC()
+	return account.QuotaWindow{
+		AccountID: credential.ID, Mode: mode, Remaining: 8, Total: 10,
+		WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream,
+	}, nil
+}
+
 func TestGatewayDoesNotPersistStatelessConsoleResponses(t *testing.T) {
 	ctx := context.Background()
 	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "console-stateless.db"))

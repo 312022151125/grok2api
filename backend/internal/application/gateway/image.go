@@ -214,24 +214,33 @@ routeLoop:
 				writeFailureAudit(http.StatusBadGateway, errorCode, &credential, route)
 				return nil, err
 			}
-			if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden && attempt == 0 && attempt+1 < attempts {
+			if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden {
 				_, _ = readRetryableBody(response.Body)
 				lease.Release()
 				delete(excluded, credential.ID)
-				continue
-			}
-			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && response.StatusCode == http.StatusTooManyRequests && lease.QuotaMode != "" {
-				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-				exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-				s.selector.MarkQuotaStateChanged(credential.Provider)
-				if reconcileErr != nil || !exhausted {
-					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
-				}
+				response = nil
+				// Egress 403 is not account-scoped; retry same account within budget, else hop route.
 				if attempt+1 < attempts {
-					_, _ = readRetryableBody(response.Body)
-					lease.Release()
 					continue
 				}
+				break
+			}
+			if isRetryableResponse(response) {
+				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+				if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && response.StatusCode == http.StatusTooManyRequests && lease.QuotaMode != "" {
+					exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+					s.selector.MarkQuotaStateChanged(credential.Provider)
+					if reconcileErr != nil || !exhausted {
+						s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+					}
+				} else {
+					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+				}
+				// Retryable response exhausts this account attempt; hop after account loop ends.
+				_, _ = readRetryableBody(response.Body)
+				lease.Release()
+				response = nil
+				continue
 			}
 			// Got a response (success or non-retry terminal) — stop hopping.
 			break routeLoop
