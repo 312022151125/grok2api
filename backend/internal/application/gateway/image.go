@@ -167,30 +167,46 @@ func (s *Service) executeImage(
 	var lastCredentialFailure *accountdomain.Credential
 	var lastCredentialError error
 	var lastRoute modeldomain.Route = firstRoute
-routeLoop:
-	for _, route := range eligible {
-		lastRoute = route
-		externalModel = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
-		auditBase = audit.Record{
-			EventID: eventID, RequestID: requestID, ClientKeyID: key.ID, ClientKeyName: key.Name,
-			ModelRouteID: route.ID, ModelPublicID: externalModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
-			Provider: string(route.Provider), Operation: operation, UsageSource: audit.UsageSourceNone, Streaming: streaming,
-		}
-		if operation == audit.OperationImageEdit {
-			auditBase.MediaInputImages = int64(max(0, inputImageCount))
-		}
-		pricingModel = s.providers.PricingModel(route.Provider, route.UpstreamModel)
-		quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-		excluded := make(map[uint64]bool)
-		// per-route account attempt loop
-		for attempt := 0; attempt < attempts; attempt++ {
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
-			if err != nil {
-				// No more accounts on this route — hop if another eligible route remains.
-				lastCredentialError = firstError(lastCredentialError, err)
-				break
+	// Per-route excluded accounts stick across retry rounds.
+	type mediaRouteAttempt struct {
+		route     modeldomain.Route
+		excluded  map[uint64]bool
+		exhausted bool
+	}
+	routeStates := make([]mediaRouteAttempt, len(eligible))
+	for i, route := range eligible {
+		routeStates[i] = mediaRouteAttempt{route: route, excluded: make(map[uint64]bool)}
+	}
+attemptRound:
+	for attempt := 0; attempt < attempts; attempt++ {
+		progressed := false
+		for routeIndex := range routeStates {
+			state := &routeStates[routeIndex]
+			if state.exhausted {
+				continue
 			}
-			excluded[lease.Credential.ID] = true
+			route := state.route
+			lastRoute = route
+			externalModel = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
+			auditBase = audit.Record{
+				EventID: eventID, RequestID: requestID, ClientKeyID: key.ID, ClientKeyName: key.Name,
+				ModelRouteID: route.ID, ModelPublicID: externalModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
+				Provider: string(route.Provider), Operation: operation, UsageSource: audit.UsageSourceNone, Streaming: streaming,
+			}
+			if operation == audit.OperationImageEdit {
+				auditBase.MediaInputImages = int64(max(0, inputImageCount))
+			}
+			pricingModel = s.providers.PricingModel(route.Provider, route.UpstreamModel)
+			quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+			// One account per route per retry round.
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", state.excluded, false)
+			if err != nil {
+				lastCredentialError = firstError(lastCredentialError, err)
+				state.exhausted = true
+				continue
+			}
+			progressed = true
+			state.excluded[lease.Credential.ID] = true
 			credential, err = s.accounts.EnsureCredential(ctx, lease.Credential, false)
 			if err != nil {
 				s.logger.Error("image_credential_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", lease.Credential.ID, "error", err)
@@ -217,13 +233,10 @@ routeLoop:
 			if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden {
 				_, _ = readRetryableBody(response.Body)
 				lease.Release()
-				delete(excluded, credential.ID)
+				delete(state.excluded, credential.ID)
 				response = nil
-				// Egress 403 is not account-scoped; retry same account within budget, else hop route.
-				if attempt+1 < attempts {
-					continue
-				}
-				break
+				// Egress 403 is not account-scoped; continue other platforms / next round.
+				continue
 			}
 			if isRetryableResponse(response) {
 				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
@@ -236,18 +249,18 @@ routeLoop:
 				} else {
 					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 				}
-				// Retryable response exhausts this account attempt; hop after account loop ends.
+				// Retryable response exhausts this route attempt; scan remaining platforms then next round.
 				_, _ = readRetryableBody(response.Body)
 				lease.Release()
 				response = nil
 				continue
 			}
 			// Got a response (success or non-retry terminal) — stop hopping.
-			break routeLoop
+			break attemptRound
 		}
-		// Exhausted accounts on this route; hop if more routes remain.
-		response = nil
-		lease = nil
+		if !progressed {
+			break
+		}
 	}
 	if response == nil {
 		writeFailureAudit(http.StatusServiceUnavailable, "upstream_unavailable", lastCredentialFailure, lastRoute)

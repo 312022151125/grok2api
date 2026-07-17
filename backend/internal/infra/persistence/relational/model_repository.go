@@ -42,7 +42,8 @@ const availableRoutePredicate = `
 `
 
 const (
-	modelProviderPriorityExpression = "CASE model_routes.provider WHEN 'grok_build' THEN 0 WHEN 'grok_web' THEN 1 WHEN 'grok_console' THEN 2 ELSE 3 END"
+	// Failover candidate order: Web → Console → Build (bare model names).
+	modelProviderPriorityExpression = "CASE model_routes.provider WHEN 'grok_web' THEN 0 WHEN 'grok_console' THEN 1 WHEN 'grok_build' THEN 2 ELSE 3 END"
 	modelSupportSortExpression      = `(SELECT COUNT(*) FROM provider_accounts account WHERE account.provider = model_routes.provider AND account.enabled = TRUE AND account.auth_status = 'active' AND (EXISTS (SELECT 1 FROM model_route_accounts binding WHERE binding.model_route_id = model_routes.id AND binding.account_id = account.id) OR (NOT EXISTS (SELECT 1 FROM model_route_accounts binding WHERE binding.model_route_id = model_routes.id) AND EXISTS (SELECT 1 FROM account_model_capabilities capability WHERE capability.account_id = account.id AND capability.upstream_model = model_routes.upstream_model))))`
 	modelSyncedSortExpression       = `(SELECT MAX(sync.last_success_at) FROM provider_accounts account JOIN account_model_sync_states sync ON sync.account_id = account.id WHERE account.provider = model_routes.provider AND account.enabled = TRUE AND account.auth_status = 'active')`
 )
@@ -130,7 +131,7 @@ func (r *ModelRepository) GetByPublicID(ctx context.Context, publicID string) (m
 }
 
 // GetByPublicIDCandidates 返回同一下游模型名称当前可用的全部来源路由。
-// 返回顺序遵循 Build、Web、Console 的稳定 Provider 顺序。
+// 返回顺序遵循 Web → Console → Build 的稳定 Provider 故障切换顺序。
 func (r *ModelRepository) GetByPublicIDCandidates(ctx context.Context, publicID string) ([]model.Route, error) {
 	db := r.availableRoutes(r.db.db.WithContext(ctx)).Where("enabled = ?", true)
 	rows, err := findModelRoutesByPublicID(db, publicID)

@@ -95,8 +95,8 @@ func ExternalPublicID(provider account.Provider, value string) string {
 	return value
 }
 
-// PublicIDCandidates 将下游模型名称展开为按 Provider 优先级排列的内部路由 ID。
-// 已显式携带 Provider 前缀的名称只会匹配指定来源。
+// PublicIDCandidates 将下游模型名称展开为按故障切换优先级排列的内部路由 ID。
+// 裸名顺序：Web → Console → Build。已显式携带 Provider 前缀的名称只会匹配指定来源。
 func PublicIDCandidates(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -112,8 +112,10 @@ func PublicIDCandidates(value string) []string {
 			return []string{normalized}
 		}
 	}
-	result := make([]string, 0, len(account.Providers()))
-	for _, providerValue := range account.Providers() {
+	// Failover order independent of account.Providers display order.
+	failoverOrder := []account.Provider{account.ProviderWeb, account.ProviderConsole, account.ProviderBuild}
+	result := make([]string, 0, len(failoverOrder))
+	for _, providerValue := range failoverOrder {
 		if normalized, ok := NormalizePublicID(providerValue, value); ok {
 			result = append(result, normalized)
 		}

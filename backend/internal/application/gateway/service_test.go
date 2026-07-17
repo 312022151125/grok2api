@@ -306,21 +306,22 @@ func TestSelectConversationRouteRespectsClientKeyAcrossSharedPublicModel(t *test
 	}
 }
 
-func TestListConversationRoutesOrdersBuildBeforeConsole(t *testing.T) {
+func TestListConversationRoutesPreservesInputOrder(t *testing.T) {
 	registry := provider.NewRegistry(&failoverAdapter{}, statelessConsoleAdapter{})
 	service := &Service{
 		clientKeys: clientkeyapp.NewService(nil, nil, nil, 60, 4, nil),
 		providers:  registry,
 	}
+	// listConversationRoutes keeps input order; candidates arrive Web → Console → Build.
 	routes := []modeldomain.Route{
-		{ID: 10, PublicID: "Build/grok-shared", Provider: account.ProviderBuild, UpstreamModel: "grok-shared"},
 		{ID: 20, PublicID: "Console/grok-shared", Provider: account.ProviderConsole, UpstreamModel: "grok-shared"},
+		{ID: 10, PublicID: "Build/grok-shared", Provider: account.ProviderBuild, UpstreamModel: "grok-shared"},
 	}
 	eligible, err := service.listConversationRoutes(routes, clientkey.Key{}, audit.OperationResponses, "/responses", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(eligible) != 2 || eligible[0].Provider != account.ProviderBuild || eligible[1].Provider != account.ProviderConsole {
+	if len(eligible) != 2 || eligible[0].Provider != account.ProviderConsole || eligible[1].Provider != account.ProviderBuild {
 		t.Fatalf("eligible = %#v", eligible)
 	}
 }
@@ -375,9 +376,10 @@ func TestCreateResponseFallsAcrossProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buildAdapter := &crossProviderBuildAdapter{accountID: buildAccount.ID}
-	consoleAdapter := &crossProviderConsoleAdapter{accountID: consoleAccount.ID}
-	registry := provider.NewRegistry(buildAdapter, consoleAdapter)
+	// Order is Web → Console → Build. Console fails 429; Build succeeds.
+	consoleAdapter := &crossProviderConsoleFailAdapter{accountID: consoleAccount.ID}
+	buildAdapter := &crossProviderBuildOKAdapter{accountID: buildAccount.ID}
+	registry := provider.NewRegistry(consoleAdapter, buildAdapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
@@ -395,23 +397,181 @@ func TestCreateResponseFallsAcrossProviders(t *testing.T) {
 	}
 	result.Finalize(Usage{}, "resp-cross", "")
 	_ = result.Body.Close()
-	if string(body) != "console-ok" {
+	if string(body) != "build-ok" {
 		t.Fatalf("body = %q", body)
 	}
-	if !buildAdapter.called.Load() {
-		t.Fatal("build adapter was not attempted")
-	}
 	if !consoleAdapter.called.Load() {
-		t.Fatal("console adapter was not attempted")
+		t.Fatal("console adapter was not attempted first")
+	}
+	if !buildAdapter.called.Load() {
+		t.Fatal("build adapter was not attempted after console failure")
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].Provider != string(account.ProviderConsole) || logs[0].AttemptCount < 1 {
+	if err != nil || total != 1 || logs[0].Provider != string(account.ProviderBuild) || logs[0].AttemptCount < 1 {
 		t.Fatalf("audit = %#v total=%d err=%v", logs, total, err)
 	}
 	detail, err := auditRepo.Get(ctx, logs[0].ID)
-	if err != nil || len(detail.Attempts) < 1 || detail.Attempts[0].AccountID == nil || *detail.Attempts[0].AccountID != buildAccount.ID {
+	if err != nil || len(detail.Attempts) < 1 || detail.Attempts[0].AccountID == nil || *detail.Attempts[0].AccountID != consoleAccount.ID {
 		t.Fatalf("cross-provider attempts = %#v err=%v", detail, err)
 	}
+}
+
+
+func TestCreateResponseRoundRobinAcrossProvidersTwoRounds(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "round-robin-failover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+
+	type seeded struct {
+		provider account.Provider
+		name     string
+		id       uint64
+	}
+	// Two accounts per platform so round 1 uses *1 and round 2 uses *2.
+	seeds := []seeded{
+		{account.ProviderWeb, "web-1", 0},
+		{account.ProviderWeb, "web-2", 0},
+		{account.ProviderConsole, "console-1", 0},
+		{account.ProviderConsole, "console-2", 0},
+		{account.ProviderBuild, "build-1", 0},
+		{account.ProviderBuild, "build-2", 0},
+	}
+	for i := range seeds {
+		cred := account.Credential{
+			Provider: seeds[i].provider, Name: seeds[i].name, SourceKey: seeds[i].name,
+			EncryptedAccessToken: seeds[i].name + "-token", Enabled: true, AuthStatus: account.AuthStatusActive,
+			// Higher priority first so round 1 prefers *-1 accounts.
+			Priority: 200 - i, MaxConcurrent: 1,
+		}
+		if seeds[i].provider == account.ProviderWeb || seeds[i].provider == account.ProviderConsole {
+			cred.AuthType = account.AuthTypeSSO
+		} else {
+			cred.ExpiresAt = time.Now().Add(time.Hour)
+		}
+		value, _, err := accountRepo.UpsertByIdentity(ctx, cred)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seeds[i].id = value.ID
+	}
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{
+		{PublicID: "grok-round-robin", Provider: account.ProviderWeb, UpstreamModel: "grok-round-robin", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{PublicID: "grok-round-robin", Provider: account.ProviderConsole, UpstreamModel: "grok-round-robin", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{PublicID: "grok-round-robin", Provider: account.ProviderBuild, UpstreamModel: "grok-round-robin", Capability: modeldomain.CapabilityResponses, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, seed := range seeds {
+		if err := modelRepo.ReplaceAccountCapabilities(ctx, seed.id, []string{"grok-round-robin"}, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "round-robin-key", Prefix: "rr", SecretHash: strings.Repeat("d", 64), EncryptedSecret: "encrypted-key",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := &roundRobinFailAdapter{}
+	// Register same failing behavior on every provider via three wrappers.
+	web := &providerScopedFailAdapter{providerValue: account.ProviderWeb, tracker: tracker}
+	console := &providerScopedFailAdapter{providerValue: account.ProviderConsole, tracker: tracker}
+	build := &providerScopedFailAdapter{providerValue: account.ProviderBuild, tracker: tracker}
+	registry := provider.NewRegistry(web, console, build)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 2)
+	_, err = service.CreateResponse(ctx, Input{
+		RequestID: "req-round-robin", ClientKey: key, PublicModel: "grok-round-robin",
+		Body: []byte(`{"model":"grok-round-robin","input":"hello"}`),
+	})
+	if err == nil {
+		t.Fatal("expected total failure after two rounds")
+	}
+	// Exact order: round1 Web1, Console1, Build1 then round2 Web2, Console2, Build2.
+	want := []uint64{seeds[0].id, seeds[2].id, seeds[4].id, seeds[1].id, seeds[3].id, seeds[5].id}
+	got := tracker.accountIDs()
+	if len(got) != len(want) {
+		t.Fatalf("attempt count = %d ids=%v want %v", len(got), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("attempt %d account = %d want %d (full got=%v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+type roundRobinFailAdapter struct {
+	mu   sync.Mutex
+	ids  []uint64
+}
+
+func (a *roundRobinFailAdapter) record(id uint64) {
+	a.mu.Lock()
+	a.ids = append(a.ids, id)
+	a.mu.Unlock()
+}
+func (a *roundRobinFailAdapter) accountIDs() []uint64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]uint64(nil), a.ids...)
+}
+
+type providerScopedFailAdapter struct {
+	providerValue account.Provider
+	tracker       *roundRobinFailAdapter
+}
+
+func (a *providerScopedFailAdapter) Provider() account.Provider { return a.providerValue }
+func (a *providerScopedFailAdapter) Definition() provider.Definition {
+	definition := testConversationDefinition(a.providerValue)
+	if a.providerValue == account.ProviderWeb {
+		definition.Media = provider.MediaSurface{}
+	}
+	return definition
+}
+func (a *providerScopedFailAdapter) QuotaMode(string) string {
+	if a.providerValue == account.ProviderWeb {
+		return "fast"
+	}
+	return ""
+}
+func (a *providerScopedFailAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+}
+func (a *providerScopedFailAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.tracker.record(request.Credential.ID)
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"error":"round limited"}`)),
+	}, nil
+}
+func (a *providerScopedFailAdapter) SyncQuota(context.Context, account.Credential) (provider.QuotaSnapshot, error) {
+	return provider.QuotaSnapshot{}, nil
+}
+func (a *providerScopedFailAdapter) SyncQuotaMode(_ context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
+	now := time.Now().UTC()
+	return account.QuotaWindow{AccountID: credential.ID, Mode: mode, Remaining: 0, Total: 10, WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream}, nil
+}
+func (a *providerScopedFailAdapter) GetBilling(context.Context, account.Credential) (account.Billing, error) {
+	return account.Billing{}, nil
+}
+func (a *providerScopedFailAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {
+	return provider.RefreshedCredential{}, nil
 }
 
 func TestCreateResponsePrefixedModelDoesNotHopProvider(t *testing.T) {
@@ -520,6 +680,40 @@ func (a *crossProviderConsoleAdapter) ForwardResponse(_ context.Context, request
 	}, nil
 }
 
+type crossProviderConsoleFailAdapter struct {
+	accountID uint64
+	called    atomic.Bool
+}
+
+func (a *crossProviderConsoleFailAdapter) Provider() account.Provider { return account.ProviderConsole }
+func (a *crossProviderConsoleFailAdapter) Definition() provider.Definition {
+	return testConversationDefinition(account.ProviderConsole)
+}
+func (a *crossProviderConsoleFailAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"error":"console limited"}`)),
+	}, nil
+}
+
+type crossProviderBuildOKAdapter struct {
+	accountID uint64
+	called    atomic.Bool
+}
+
+func (a *crossProviderBuildOKAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (a *crossProviderBuildOKAdapter) Definition() provider.Definition {
+	return testConversationDefinition(account.ProviderBuild)
+}
+func (a *crossProviderBuildOKAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader("build-ok")),
+	}, nil
+}
+
 func TestSelectMediaRouteSkipsSameNamedConversationRoute(t *testing.T) {
 	registry := provider.NewRegistry(&failoverAdapter{}, &webImageStreamAdapter{})
 	service := &Service{
@@ -605,33 +799,33 @@ func TestGenerateImageFallsAcrossProvidersAfterFinal429(t *testing.T) {
 	auditRepo := relational.NewAuditRepository(database)
 	responseRepo := relational.NewResponseRepository(database)
 	keyRepo := relational.NewClientKeyRepository(database)
-	// Candidate order is Build → Web → Console; first must fail so hop is exercised.
-	buildAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderBuild, Name: "build-image-429", SourceKey: "build-image-429",
-		EncryptedAccessToken: "build-token", ExpiresAt: time.Now().Add(time.Hour), Enabled: true,
-		AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
+	// Candidate order is Web → Console → Build; first must fail so hop is exercised.
+	webAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web-image-429", SourceKey: "web-image-429",
+		EncryptedAccessToken: "web-token", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	webAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
-		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, Name: "web-image-ok", SourceKey: "web-image-ok",
-		EncryptedAccessToken: "web-token", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	buildAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-image-ok", SourceKey: "build-image-ok",
+		EncryptedAccessToken: "build-token", ExpiresAt: time.Now().Add(time.Hour), Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{
-		{PublicID: "grok-shared-image", Provider: account.ProviderBuild, UpstreamModel: "grok-shared-image", Capability: modeldomain.CapabilityImage, Enabled: true},
 		{PublicID: "grok-shared-image", Provider: account.ProviderWeb, UpstreamModel: "grok-shared-image", Capability: modeldomain.CapabilityImage, Enabled: true},
+		{PublicID: "grok-shared-image", Provider: account.ProviderBuild, UpstreamModel: "grok-shared-image", Capability: modeldomain.CapabilityImage, Enabled: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-shared-image"}, now); err != nil {
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, webAccount.ID, []string{"grok-shared-image"}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := modelRepo.ReplaceAccountCapabilities(ctx, webAccount.ID, []string{"grok-shared-image"}, now); err != nil {
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-shared-image"}, now); err != nil {
 		t.Fatal(err)
 	}
 	key, err := keyRepo.Create(ctx, clientkey.Key{
@@ -641,13 +835,13 @@ func TestGenerateImageFallsAcrossProvidersAfterFinal429(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buildAdapter := &imageRateLimitAdapter{}
-	webAdapter := &imageSuccessAdapter{}
-	registry := provider.NewRegistry(buildAdapter, webAdapter)
+	webAdapter := &imageRateLimitAdapter{}
+	buildAdapter := &imageSuccessAdapter{}
+	registry := provider.NewRegistry(webAdapter, buildAdapter)
 	sticky := memory.NewStickyStore()
 	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
 	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
-	// maxAttempts=1 forces the final-attempt 429 path (no intra-route account retry budget left).
+	// maxAttempts=1: one account slot per platform this round; Web 429 then Build success.
 	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
 	result, err := service.GenerateImage(ctx, ImageGenerationInput{
 		RequestID: "req-image-cross-429", ClientKey: key, PublicModel: "grok-shared-image",
@@ -662,14 +856,14 @@ func TestGenerateImageFallsAcrossProvidersAfterFinal429(t *testing.T) {
 	}
 	result.Finalize(Usage{}, "", "")
 	_ = result.Body.Close()
-	if result.StatusCode != http.StatusOK || string(body) != "web-image-ok" {
+	if result.StatusCode != http.StatusOK || string(body) != "build-image-ok" {
 		t.Fatalf("status=%d body=%q", result.StatusCode, body)
 	}
-	if !buildAdapter.called.Load() {
-		t.Fatal("build image adapter was not attempted")
-	}
 	if !webAdapter.called.Load() {
-		t.Fatal("web image adapter was not attempted after final 429")
+		t.Fatal("web image adapter was not attempted first")
+	}
+	if !buildAdapter.called.Load() {
+		t.Fatal("build image adapter was not attempted after web 429")
 	}
 }
 
@@ -677,8 +871,43 @@ type imageRateLimitAdapter struct {
 	called atomic.Bool
 }
 
-func (a *imageRateLimitAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (a *imageRateLimitAdapter) Provider() account.Provider { return account.ProviderWeb }
 func (a *imageRateLimitAdapter) Definition() provider.Definition {
+	definition := testConversationDefinition(account.ProviderWeb)
+	definition.Media.ImageGeneration = true
+	definition.ModelCapabilities = []modeldomain.Capability{modeldomain.CapabilityImage}
+	return definition
+}
+func (a *imageRateLimitAdapter) QuotaMode(string) string { return "fast" }
+func (a *imageRateLimitAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+}
+func (a *imageRateLimitAdapter) GenerateImage(context.Context, provider.ImageGenerationRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	header := make(http.Header)
+	header.Set("Retry-After", "3600")
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: header,
+		Body: io.NopCloser(strings.NewReader(`{"error":"web image limited"}`)),
+	}, nil
+}
+func (a *imageRateLimitAdapter) SyncQuota(context.Context, account.Credential) (provider.QuotaSnapshot, error) {
+	return provider.QuotaSnapshot{}, nil
+}
+func (a *imageRateLimitAdapter) SyncQuotaMode(_ context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
+	now := time.Now().UTC()
+	return account.QuotaWindow{
+		AccountID: credential.ID, Mode: mode, Remaining: 0, Total: 10,
+		WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream,
+	}, nil
+}
+
+type imageSuccessAdapter struct {
+	called atomic.Bool
+}
+
+func (a *imageSuccessAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (a *imageSuccessAdapter) Definition() provider.Definition {
 	return provider.Definition{
 		Provider: account.ProviderBuild, ModelNamespace: account.ProviderBuild.ModelNamespace(),
 		Credential:        provider.CredentialSurface{AuthType: account.AuthTypeOAuth, Refresh: true},
@@ -687,53 +916,18 @@ func (a *imageRateLimitAdapter) Definition() provider.Definition {
 		Quota:             provider.QuotaBilling,
 	}
 }
-func (a *imageRateLimitAdapter) GenerateImage(context.Context, provider.ImageGenerationRequest) (*provider.Response, error) {
-	a.called.Store(true)
-	header := make(http.Header)
-	header.Set("Retry-After", "3600")
-	return &provider.Response{
-		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: header,
-		Body: io.NopCloser(strings.NewReader(`{"error":"build image limited"}`)),
-	}, nil
-}
-func (a *imageRateLimitAdapter) GetBilling(context.Context, account.Credential) (account.Billing, error) {
-	return account.Billing{}, nil
-}
-func (a *imageRateLimitAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {
-	return provider.RefreshedCredential{}, nil
-}
-
-type imageSuccessAdapter struct {
-	called atomic.Bool
-}
-
-func (a *imageSuccessAdapter) Provider() account.Provider { return account.ProviderWeb }
-func (a *imageSuccessAdapter) Definition() provider.Definition {
-	definition := testConversationDefinition(account.ProviderWeb)
-	definition.Media.ImageGeneration = true
-	definition.ModelCapabilities = []modeldomain.Capability{modeldomain.CapabilityImage}
-	return definition
-}
-func (a *imageSuccessAdapter) QuotaMode(string) string { return "fast" }
-func (a *imageSuccessAdapter) TierOrder(string) []account.WebTier {
-	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
-}
 func (a *imageSuccessAdapter) GenerateImage(context.Context, provider.ImageGenerationRequest) (*provider.Response, error) {
 	a.called.Store(true)
 	return &provider.Response{
 		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
-		Body: io.NopCloser(strings.NewReader("web-image-ok")), QuotaUnits: 1,
+		Body: io.NopCloser(strings.NewReader("build-image-ok")), QuotaUnits: 1,
 	}, nil
 }
-func (a *imageSuccessAdapter) SyncQuota(context.Context, account.Credential) (provider.QuotaSnapshot, error) {
-	return provider.QuotaSnapshot{}, nil
+func (a *imageSuccessAdapter) GetBilling(context.Context, account.Credential) (account.Billing, error) {
+	return account.Billing{}, nil
 }
-func (a *imageSuccessAdapter) SyncQuotaMode(_ context.Context, credential account.Credential, mode string) (account.QuotaWindow, error) {
-	now := time.Now().UTC()
-	return account.QuotaWindow{
-		AccountID: credential.ID, Mode: mode, Remaining: 8, Total: 10,
-		WindowSeconds: 3600, SyncedAt: &now, Source: account.QuotaSourceUpstream,
-	}, nil
+func (a *imageSuccessAdapter) RefreshCredential(context.Context, account.Credential) (provider.RefreshedCredential, error) {
+	return provider.RefreshedCredential{}, nil
 }
 
 func TestGatewayDoesNotPersistStatelessConsoleResponses(t *testing.T) {

@@ -476,32 +476,23 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	var lastFailure *UpstreamFailure
 	lastRoute := eligible[0]
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, path)
-routeLoop:
+	// Per-route state survives across retry rounds so excluded accounts and fingerprints stick.
+	type conversationRouteAttempt struct {
+		route                   modeldomain.Route
+		adapter                 provider.ResponseAdapter
+		supportsStoredResponses bool
+		promptCacheKey          string
+		idempotencyID           string
+		pricingModel            string
+		quotaMode               string
+		excluded                map[uint64]bool
+		failureFingerprints     map[string]int
+		authRecoveryAttempted   map[uint64]bool
+		quotaProbeAttempted     bool
+		skip                    bool
+	}
+	routeStates := make([]conversationRouteAttempt, 0, len(eligible))
 	for _, route := range eligible {
-		lastRoute = route
-		publicModel = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
-		input.PublicModel = publicModel
-		timing.setRoute(publicModel, route.Provider)
-		usageSource = audit.UsageSourceUpstream
-		if usageKind, _ := s.providers.UsageKind(route.Provider); usageKind == provider.UsageEstimated {
-			usageSource = audit.UsageSourceEstimated
-		}
-		auditBase = audit.Record{
-			EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
-			ModelRouteID: route.ID, ModelPublicID: publicModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
-			Provider: string(route.Provider), Operation: operation, UsageSource: usageSource, Streaming: input.Streaming,
-		}
-		promptCacheKey := ""
-		if route.Provider == accountdomain.ProviderBuild {
-			promptCacheKey = resolvePromptCacheIdentity(
-				input.ClientKey.ID,
-				route.Provider,
-				route.UpstreamModel,
-				operation,
-				input.PromptCacheKey,
-				input.PromptCacheSeed,
-			)
-		}
 		adapter, ok := s.providers.Responses(route.Provider)
 		if !ok {
 			continue
@@ -511,50 +502,87 @@ routeLoop:
 			// Ownership already pinned this provider; fail closed rather than hop.
 			return nil, ErrResponseStateUnsupported
 		}
-		attempts := baseAttempts
+		promptCacheKey := ""
+		if route.Provider == accountdomain.ProviderBuild {
+			promptCacheKey = resolvePromptCacheIdentity(
+				input.ClientKey.ID, route.Provider, route.UpstreamModel, operation, input.PromptCacheKey, input.PromptCacheSeed,
+			)
+		}
 		idempotencyID, _ := security.NewOpaqueToken(18)
-		pricingModel = s.providers.PricingModel(route.Provider, route.UpstreamModel)
-		excluded := make(map[uint64]bool)
-		failureFingerprints := make(map[string]int)
-		authRecoveryAttempted := make(map[uint64]bool)
-		quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-		quotaProbeAttempted := false
-		systemicStop := false
-		forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
-			started := time.Now()
-			response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: promptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
-			err = failureAttempts.captureResponse(credential, started, response, err)
-			timing.markUpstream(time.Since(started))
-			return response, err
-		}
-		ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
-			started := time.Now()
-			result, err := s.accounts.EnsureCredential(ctx, credential, force)
-			failureAttempts.captureCredentialFailure(credential, started, force, err)
-			timing.markCredential(time.Since(started))
-			return result, err
-		}
-	attemptLoop:
-		for attempt := 0; attempt < attempts; attempt++ {
+		routeStates = append(routeStates, conversationRouteAttempt{
+			route: route, adapter: adapter, supportsStoredResponses: supportsStoredResponses,
+			promptCacheKey: promptCacheKey, idempotencyID: idempotencyID,
+			pricingModel: s.providers.PricingModel(route.Provider, route.UpstreamModel),
+			quotaMode: s.providers.QuotaMode(route.Provider, route.UpstreamModel),
+			excluded: make(map[uint64]bool), failureFingerprints: make(map[string]int),
+			authRecoveryAttempted: make(map[uint64]bool),
+		})
+	}
+	if len(routeStates) == 0 {
+		return nil, ErrConversationUnsupported
+	}
+attemptRound:
+	for attempt := 0; attempt < baseAttempts; attempt++ {
+		progressed := false
+		for routeIndex := range routeStates {
+			state := &routeStates[routeIndex]
+			if state.skip {
+				continue
+			}
+			route := state.route
+			lastRoute = route
+			publicModel = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
+			input.PublicModel = publicModel
+			timing.setRoute(publicModel, route.Provider)
+			usageSource = audit.UsageSourceUpstream
+			if usageKind, _ := s.providers.UsageKind(route.Provider); usageKind == provider.UsageEstimated {
+				usageSource = audit.UsageSourceEstimated
+			}
+			auditBase = audit.Record{
+				EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
+				ModelRouteID: route.ID, ModelPublicID: publicModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel),
+				Provider: string(route.Provider), Operation: operation, UsageSource: usageSource, Streaming: input.Streaming,
+			}
+			pricingModel = state.pricingModel
+			adapter := state.adapter
+			supportsStoredResponses := state.supportsStoredResponses
+			promptCacheKey := state.promptCacheKey
+			idempotencyID := state.idempotencyID
+			quotaMode := state.quotaMode
+			forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
+				started := time.Now()
+				response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: promptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
+				err = failureAttempts.captureResponse(credential, started, response, err)
+				timing.markUpstream(time.Since(started))
+				return response, err
+			}
+			ensureCredential := func(credential accountdomain.Credential, force bool) (accountdomain.Credential, error) {
+				started := time.Now()
+				result, err := s.accounts.EnsureCredential(ctx, credential, force)
+				failureAttempts.captureCredentialFailure(credential, started, force, err)
+				timing.markCredential(time.Since(started))
+				return result, err
+			}
+			// One account per route per retry round; excluded accounts stick across rounds.
 			var lease *accountLease
 			var err error
 			selectionStarted := time.Now()
 			if ownership != nil {
 				lease, err = s.selector.AcquirePinned(ctx, route.Provider, ownership.AccountID, route.UpstreamModel, quotaMode, true)
 			} else {
-				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, promptCacheKey, excluded, !quotaProbeAttempted)
+				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, promptCacheKey, state.excluded, !state.quotaProbeAttempted)
 			}
 			timing.markSelection(time.Since(selectionStarted))
 			if err != nil {
 				lastErr = err
-				// Route never reached upstream; do not keep a prior channel's lastFailure
-				// so final audit attributes the total failure to this last route.
-				if len(excluded) == 0 {
+				if len(state.excluded) == 0 {
 					lastFailure = nil
 				}
-				break
+				state.skip = true
+				continue
 			}
-			excluded[lease.Credential.ID] = true
+			state.excluded[lease.Credential.ID] = true
+			progressed = true
 			if limited, ok := s.activeTeamModelRateLimit(lease.Credential, route.UpstreamModel, time.Now().UTC()); ok {
 				lease.Release()
 				lastFailure = &UpstreamFailure{
@@ -563,11 +591,11 @@ routeLoop:
 				}
 				lastErr = fmt.Errorf("上游 Team 与模型请求频率受限")
 				s.logger.Warn("upstream_team_model_rate_limit_active", "request_id", input.RequestID, "provider", route.Provider, "model", route.UpstreamModel, "team_fingerprint", limited.TeamFingerprint, "retry_after", lastFailure.RetryAfter.Round(time.Second))
-				attempt--
+				// One platform slot this round is spent; continue other platforms then next round.
 				continue
 			}
 			if lease.QuotaProbe {
-				quotaProbeAttempted = true
+				state.quotaProbeAttempted = true
 			}
 			if lease.QuotaProbeKind == accountdomain.QuotaRecoveryKindPaid {
 				recovered, probeErr := s.accounts.ProbePaidQuota(ctx, lease.Credential)
@@ -594,13 +622,12 @@ routeLoop:
 				lastErr = err
 				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 					lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
-					break
+					break attemptRound
 				}
 				lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
-				failureFingerprints[lastFailure.Fingerprint]++
-				if failureFingerprints[lastFailure.Fingerprint] >= 2 {
-					systemicStop = true
-					break
+				state.failureFingerprints[lastFailure.Fingerprint]++
+				if state.failureFingerprints[lastFailure.Fingerprint] >= 2 {
+					state.skip = true
 				}
 				continue
 			}
@@ -624,7 +651,7 @@ routeLoop:
 					lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
 					continue
 				}
-				authRecoveryAttempted[credential.ID] = true
+				state.authRecoveryAttempted[credential.ID] = true
 				refreshed, refreshErr := ensureCredential(credential, true)
 				if refreshErr == nil {
 					response, err = forwardResponse(refreshed)
@@ -640,7 +667,7 @@ routeLoop:
 						lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
 					} else if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 						lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
-						break
+						break attemptRound
 					} else {
 						lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 					}
@@ -657,13 +684,13 @@ routeLoop:
 				}
 			}
 			egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden
-			finalEgressForbidden := egressForbidden && (attempt > 0 || attempt+1 >= attempts)
-			if isRetryableResponse(response) && !finalEgressForbidden {
+			// Final egress 403 still exhausts this route attempt and continues other platforms/rounds.
+			if isRetryableResponse(response) {
 				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 				body, _ := readRetryableBody(response.Body)
 				if egressForbidden {
 					// Web 403/code 7 表示出口浏览器会话被拒绝；Provider 已重建会话并降低节点健康，不应误伤账号。
-					delete(excluded, credential.ID)
+					delete(state.excluded, credential.ID)
 					lease.Release()
 					lastErr = fmt.Errorf("Grok Web 出口会话被反机器人规则拒绝")
 					lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
@@ -680,14 +707,14 @@ routeLoop:
 					s.logger.Warn("upstream_team_model_rate_limited", "request_id", input.RequestID, "provider", credential.Provider, "model", route.UpstreamModel, "team_fingerprint", limited.TeamFingerprint, "scope", response.RateLimit.Scope, "actual", response.RateLimit.Actual, "limit", response.RateLimit.Limit, "retry_after", lastFailure.RetryAfter)
 					continue
 				}
-				if s.providers.SupportsCredentialRefresh(credential.Provider) && !authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
-					authRecoveryAttempted[credential.ID] = true
+				if s.providers.SupportsCredentialRefresh(credential.Provider) && !state.authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
+					state.authRecoveryAttempted[credential.ID] = true
 					refreshed, refreshErr := ensureCredential(credential, true)
 					if refreshErr != nil {
 						lease.Release()
 						lastErr = refreshErr
 						lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
-						continue attemptLoop
+						continue
 					}
 					response, err = forwardResponse(refreshed)
 					credential = refreshed
@@ -696,10 +723,10 @@ routeLoop:
 						lastErr = err
 						if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 							lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "请求已取消", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
-							break attemptLoop
+							break attemptRound
 						}
 						lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
-						continue attemptLoop
+						continue
 					}
 					goto handleResponse
 				}
@@ -736,10 +763,9 @@ routeLoop:
 				lastErr = fmt.Errorf("上游返回 %d", response.StatusCode)
 				s.logger.Warn("upstream_request_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode, "account_scoped", lastFailure.AccountScoped)
 				if !lastFailure.AccountScoped {
-					failureFingerprints[lastFailure.Fingerprint]++
-					if failureFingerprints[lastFailure.Fingerprint] >= 2 {
-						systemicStop = true
-						break
+					state.failureFingerprints[lastFailure.Fingerprint]++
+					if state.failureFingerprints[lastFailure.Fingerprint] >= 2 {
+						state.skip = true
 					}
 				}
 				continue
@@ -824,12 +850,11 @@ routeLoop:
 			timingHandedOff = true
 			return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Finalize: finalize}, nil
 		}
-		// Channel hop decision after account loop for this route.
-		if lastFailure != nil && lastFailure.Code == "request_canceled" {
-			break routeLoop
+		if !progressed || ownership != nil {
+			break
 		}
-		if ownership != nil || systemicStop {
-			break routeLoop
+		if lastFailure != nil && lastFailure.Code == "request_canceled" {
+			break
 		}
 	}
 	if lastFailure != nil {

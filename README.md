@@ -199,7 +199,7 @@ Grok Console 内置模型：
 
 Console 上游路由始终使用 `Console/` 内部前缀，不再根据启动顺序生成 `-console` 冲突后缀。升级产生的兼容别名不会出现在 `GET /v1/models`。
 
-同名裸模型名会按 Build → Web → Console 顺序尝试全部合格渠道；某一渠道账号池耗尽或可重试失败后继续下一渠道。带 `Build/`、`Web/`、`Console/` 前缀的名称锁定单渠道；会话粘滞与 `previous_response_id` 归属仍会钉住原 Provider。
+同名裸模型名每一轮会按 Web → Console → Build 扫完全部合格渠道（`maxAttempts` 控制轮数，每轮每渠道取一个账号）；带 `Build/`、`Web/`、`Console/` 前缀的名称锁定单渠道；会话粘滞与 `previous_response_id` 归属仍会钉住原 Provider。
 
 ## API
 

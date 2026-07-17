@@ -119,7 +119,7 @@ func TestPublicModelNameResolvesAcrossAvailableProviders(t *testing.T) {
 	}
 
 	routes, err := models.GetByPublicIDCandidates(ctx, "grok-shared")
-	if err != nil || len(routes) != 2 || routes[0].Provider != account.ProviderBuild || routes[1].Provider != account.ProviderConsole {
+	if err != nil || len(routes) != 2 || routes[0].Provider != account.ProviderConsole || routes[1].Provider != account.ProviderBuild {
 		t.Fatalf("shared routes = %#v, err = %v", routes, err)
 	}
 	explicit, err := models.GetByPublicIDCandidates(ctx, "Console/grok-shared")

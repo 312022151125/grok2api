@@ -55,18 +55,44 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if err != nil {
 		return media.Job{}, err
 	}
+	attempts := int(s.maxAttempts.Load())
+	if attempts <= 0 {
+		attempts = 3
+	}
+	type videoRouteAttempt struct {
+		route     model.Route
+		excluded  map[uint64]bool
+		exhausted bool
+	}
+	routeStates := make([]videoRouteAttempt, len(eligible))
+	for i, candidate := range eligible {
+		routeStates[i] = videoRouteAttempt{route: candidate, excluded: make(map[uint64]bool)}
+	}
 	var route model.Route
 	var lease *accountLease
-	for _, candidate := range eligible {
-		quotaMode := s.providers.QuotaMode(candidate.Provider, candidate.UpstreamModel)
-		acquired, acquireErr := s.selector.Acquire(ctx, candidate.Provider, candidate.UpstreamModel, quotaMode, "", nil, false)
-		if acquireErr != nil {
-			err = acquireErr
-			continue
+	for attempt := 0; attempt < attempts && lease == nil; attempt++ {
+		progressed := false
+		for i := range routeStates {
+			state := &routeStates[i]
+			if state.exhausted {
+				continue
+			}
+			quotaMode := s.providers.QuotaMode(state.route.Provider, state.route.UpstreamModel)
+			acquired, acquireErr := s.selector.Acquire(ctx, state.route.Provider, state.route.UpstreamModel, quotaMode, "", state.excluded, false)
+			if acquireErr != nil {
+				err = acquireErr
+				state.exhausted = true
+				continue
+			}
+			progressed = true
+			state.excluded[acquired.Credential.ID] = true
+			route = state.route
+			lease = acquired
+			break
 		}
-		route = candidate
-		lease = acquired
-		break
+		if !progressed {
+			break
+		}
 	}
 	if lease == nil {
 		if err == nil {
