@@ -494,6 +494,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		adapter                 provider.ResponseAdapter
 		supportsStoredResponses bool
 		promptCacheKey          string
+		affinityKey             string
 		idempotencyID           string
 		pricingModel            string
 		quotaMode               string
@@ -515,15 +516,18 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return nil, ErrResponseStateUnsupported
 		}
 		promptCacheKey := ""
+		affinityKey := ""
 		if route.Provider == accountdomain.ProviderBuild {
-			promptCacheKey = resolvePromptCacheIdentity(
-				input.ClientKey.ID, route.Provider, route.UpstreamModel, operation, input.PromptCacheKey, input.PromptCacheSeed,
+			identity := resolveBuildSessionIdentity(
+				input.ClientKey.ID, route.Provider, route.UpstreamModel, input.PromptCacheKey, input.PromptCacheSeed,
 			)
+			promptCacheKey = identity.upstreamID
+			affinityKey = identity.affinityKey
 		}
 		idempotencyID, _ := security.NewOpaqueToken(18)
 		routeStates = append(routeStates, conversationRouteAttempt{
 			route: route, adapter: adapter, supportsStoredResponses: supportsStoredResponses,
-			promptCacheKey: promptCacheKey, idempotencyID: idempotencyID,
+			promptCacheKey: promptCacheKey, affinityKey: affinityKey, idempotencyID: idempotencyID,
 			pricingModel: s.providers.PricingModel(route.Provider, route.UpstreamModel),
 			quotaMode:    s.providers.QuotaMode(route.Provider, route.UpstreamModel),
 			excluded:     make(map[uint64]bool), failureFingerprints: make(map[string]int),
@@ -559,6 +563,7 @@ attemptRound:
 			adapter := state.adapter
 			supportsStoredResponses := state.supportsStoredResponses
 			promptCacheKey := state.promptCacheKey
+			affinityKey := state.affinityKey
 			idempotencyID := state.idempotencyID
 			quotaMode := state.quotaMode
 			forwardResponse := func(credential accountdomain.Credential) (*provider.Response, error) {
@@ -582,7 +587,7 @@ attemptRound:
 			if ownership != nil {
 				lease, err = s.selector.AcquirePinned(ctx, route.Provider, ownership.AccountID, route.UpstreamModel, quotaMode, true)
 			} else {
-				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, promptCacheKey, state.excluded, !state.quotaProbeAttempted)
+				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, affinityKey, state.excluded, !state.quotaProbeAttempted)
 			}
 			timing.markSelection(time.Since(selectionStarted))
 			if err != nil {
