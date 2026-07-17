@@ -240,6 +240,7 @@ type ImageEditRequest struct {
 
 type VideoRequest struct {
 	Credential    account.Credential
+	Model         string
 	Prompt        string
 	Duration      int
 	AspectRatio   string

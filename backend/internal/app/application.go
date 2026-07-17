@@ -228,6 +228,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Applicat
 		database.Close()
 		return nil, fmt.Errorf("初始化 Grok Console 模型目录: %w", err)
 	}
+	if err := modelRepo.UpsertRoutes(ctx, cliprovider.Routes()); err != nil {
+		if runtimeStore != nil {
+			_ = runtimeStore.Close()
+		}
+		database.Close()
+		return nil, fmt.Errorf("初始化 Grok Build 模型目录: %w", err)
+	}
 	accountSyncService := accountsyncapp.NewService(logger, accountService, accountService, accountService, modelService)
 	accountSyncService.SetBulkPool(importPool)
 	accountSyncService.UpdateConcurrency(cfg.Batch.ImportConcurrency)

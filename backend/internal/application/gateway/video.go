@@ -48,19 +48,33 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if err != nil {
 		return media.Job{}, ErrModelNotFound
 	}
-	route, err := s.selectMediaRoute(routes, input.ClientKey, model.CapabilityVideo, func(providerValue account.Provider) bool {
+	eligible, err := s.listMediaRoutes(routes, input.ClientKey, model.CapabilityVideo, func(providerValue account.Provider) bool {
 		_, ok := s.providers.Videos(providerValue)
 		return ok
 	})
 	if err != nil {
 		return media.Job{}, err
 	}
-	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
-	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
-	if err != nil {
+	var route model.Route
+	var lease *accountLease
+	for _, candidate := range eligible {
+		quotaMode := s.providers.QuotaMode(candidate.Provider, candidate.UpstreamModel)
+		acquired, acquireErr := s.selector.Acquire(ctx, candidate.Provider, candidate.UpstreamModel, quotaMode, "", nil, false)
+		if acquireErr != nil {
+			err = acquireErr
+			continue
+		}
+		route = candidate
+		lease = acquired
+		break
+	}
+	if lease == nil {
+		if err == nil {
+			err = ErrNoAvailableAccount
+		}
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 	}
+	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	accountID := lease.Credential.ID
 	lease.Release()
 	token, err := security.NewOpaqueToken(18)
@@ -261,7 +275,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	lastProgress := job.Progress
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
-		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
+		Credential: lease.Credential, Model: route.UpstreamModel, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
 		ReferenceURLs: decodeVideoInput(job.InputJSON),
 		Progress: func(value int) {
 			value = min(99, max(1, value))

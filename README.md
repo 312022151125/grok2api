@@ -153,7 +153,7 @@ Grok Console 固定使用 `store: false`，不支持 `previous_response_id`、Re
 
 ## 模型
 
-对外模型名称不带 Provider 前缀，例如 `grok-4.5`。内部上游路由使用 `Build/`、`Web/`、`Console/` 前缀区分实际来源；Grok Build 模型根据账号能力动态同步，请以管理端模型页或 `GET /v1/models` 为准。
+对外模型名称不带 Provider 前缀，例如 `grok-4.5`。内部上游路由使用 `Build/`、`Web/`、`Console/` 前缀区分实际来源；Grok Build 同时静态预置约定文本模型并保留远端 `ListModels` 发现，请以管理端模型页或 `GET /v1/models` 为准。
 
 升级时会原位迁移内部路由并保留路由主键、客户端密钥权限和旧名称别名。多个来源可以提供同一个对外模型名称；网关会按客户端权限、协议能力和账号可用性选择来源。带 Provider 前缀的名称仍可作为兼容入口，用于显式指定渠道。
 
@@ -169,6 +169,20 @@ Grok Web 内置模型：
 | `grok-imagine-image-quality` | Quality 图片生成 | Super |
 | `grok-imagine-image-edit` | 图片编辑 | Super |
 | `grok-imagine-video` | 视频生成 | Super |
+| `grok-imagine-video-1.5-preview` | 视频生成（预览） | Super |
+
+Grok Build 内置文本模型（Responses / Chat / Messages，另加远端发现）：
+
+| 模型 | 备注 |
+| :-- | :-- |
+| `grok-build-0.1` | 与 Console 重叠 |
+| `grok-4.5` | 仅 Build 静态注册 |
+| `grok-4.3` | 与 Console 重叠 |
+| `grok-4.20-0309-reasoning` | 与 Console 重叠 |
+| `grok-4.20-0309-non-reasoning` | 与 Console 重叠 |
+| `grok-4.20-multi-agent-0309` | 与 Console 重叠 |
+| `grok-3-mini` | Build 静态注册 |
+| `grok-3-mini-fast` | Build 静态注册 |
 
 Grok Console 内置模型：
 
@@ -185,7 +199,7 @@ Grok Console 内置模型：
 
 Console 上游路由始终使用 `Console/` 内部前缀，不再根据启动顺序生成 `-console` 冲突后缀。升级产生的兼容别名不会出现在 `GET /v1/models`。
 
-同名模型会在当前可用来源中自动选路；来源选定后，账号故障切换只发生在该 Provider 的账号池内。
+同名裸模型名会按 Build → Web → Console 顺序尝试全部合格渠道；某一渠道账号池耗尽或可重试失败后继续下一渠道。带 `Build/`、`Web/`、`Console/` 前缀的名称锁定单渠道；会话粘滞与 `previous_response_id` 归属仍会钉住原 Provider。
 
 ## API
 

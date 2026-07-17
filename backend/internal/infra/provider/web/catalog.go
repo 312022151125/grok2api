@@ -23,6 +23,7 @@ var catalog = []ModelSpec{
 	{PublicID: "grok-imagine-image-quality", UpstreamModel: "grok-imagine-image-quality", ProtocolModel: "imagine", Capability: modeldomain.CapabilityImage, MinimumTier: account.WebTierSuper},
 	{PublicID: "grok-imagine-image-edit", UpstreamModel: "imagine-image-edit", Capability: modeldomain.CapabilityImageEdit, MinimumTier: account.WebTierSuper},
 	{PublicID: "grok-imagine-video", UpstreamModel: "grok-imagine-video", ProtocolModel: "imagine-video-gen", Capability: modeldomain.CapabilityVideo, MinimumTier: account.WebTierSuper},
+	{PublicID: "grok-imagine-video-1.5-preview", UpstreamModel: "grok-imagine-video-1.5-preview", ProtocolModel: "imagine-video-gen", Capability: modeldomain.CapabilityVideo, MinimumTier: account.WebTierSuper},
 }
 
 func Catalog() []ModelSpec { return append([]ModelSpec(nil), catalog...) }

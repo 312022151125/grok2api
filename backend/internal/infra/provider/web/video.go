@@ -63,7 +63,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
+	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references, videoProtocolModel(request.Model))
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
 		return provider.VideoResult{}, err
@@ -216,7 +216,19 @@ func videoSegments(seconds int) []int {
 	return []int{seconds}
 }
 
-func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string) map[string]any {
+func videoProtocolModel(upstreamModel string) string {
+	if spec, ok := Resolve(upstreamModel); ok {
+		if model := strings.TrimSpace(spec.ProtocolModel); model != "" {
+			return model
+		}
+	}
+	return "imagine-video-gen"
+}
+
+func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string, protocolModel string) map[string]any {
+	if strings.TrimSpace(protocolModel) == "" {
+		protocolModel = "imagine-video-gen"
+	}
 	config := map[string]any{"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution}
 	if len(references) > 0 {
 		config["isVideoEdit"] = false
@@ -224,7 +236,7 @@ func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int,
 		config["imageReferences"] = references
 	}
 	return map[string]any{
-		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
+		"temporary": true, "modelName": protocolModel, "message": prompt + " --mode=custom", "enableSideBySide": true,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
 }

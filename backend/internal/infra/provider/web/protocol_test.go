@@ -27,7 +27,7 @@ import (
 
 func TestCatalogMatchesSupportedSurface(t *testing.T) {
 	values := Catalog()
-	if len(values) != 8 {
+	if len(values) != 9 {
 		t.Fatalf("catalog size = %d", len(values))
 	}
 	publicIDs := make(map[string]struct{}, len(values))
@@ -42,7 +42,7 @@ func TestCatalogMatchesSupportedSurface(t *testing.T) {
 		publicIDs[value.PublicID] = struct{}{}
 		upstreamIDs[value.UpstreamModel] = struct{}{}
 	}
-	for _, required := range []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy", "grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-edit", "grok-imagine-video"} {
+	for _, required := range []string{"grok-chat-fast", "grok-chat-auto", "grok-chat-expert", "grok-chat-heavy", "grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-edit", "grok-imagine-video", "grok-imagine-video-1.5-preview"} {
 		if _, exists := publicIDs[required]; !exists {
 			t.Fatalf("missing supported model: %s", required)
 		}
@@ -64,6 +64,7 @@ func TestWebChatPricingUsesGrok45(t *testing.T) {
 	mediaModels := map[string]string{
 		"grok-imagine-image": "grok-imagine-image", "grok-imagine-image-quality": "grok-imagine-image-quality",
 		"imagine-image-edit": "grok-imagine-image-edit", "grok-imagine-video": "grok-imagine-video",
+		"grok-imagine-video-1.5-preview": "grok-imagine-video-1.5-preview",
 	}
 	for upstreamModel, expected := range mediaModels {
 		if got := registry.PricingModel(account.ProviderWeb, upstreamModel); got != expected {

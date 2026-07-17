@@ -149,11 +149,11 @@ func TestGatewayFailsOverBeforeReturningBody(t *testing.T) {
 		t.Fatalf("observed account = %#v, err = %v", observedAccount, err)
 	}
 	logs, total, err := auditRepo.List(ctx, 0, 10)
-	if err != nil || total != 1 || logs[0].AccountID == nil || *logs[0].AccountID != second.ID || logs[0].ClientKeyName != "test-key" || logs[0].ModelPublicID != "grok-test" || logs[0].ModelUpstreamModel != "Build/grok-test" || logs[0].AccountName != "second" || logs[0].CachedInputTokens != 80 || logs[0].AttemptCount != 0 {
+	if err != nil || total != 1 || logs[0].AccountID == nil || *logs[0].AccountID != second.ID || logs[0].ClientKeyName != "test-key" || logs[0].ModelPublicID != "grok-test" || logs[0].ModelUpstreamModel != "Build/grok-test" || logs[0].AccountName != "second" || logs[0].CachedInputTokens != 80 || logs[0].AttemptCount != 1 {
 		t.Fatalf("audit = %#v, %d, %v", logs, total, err)
 	}
 	detail, err := auditRepo.Get(ctx, logs[0].ID)
-	if err != nil || len(detail.Attempts) != 0 {
+	if err != nil || len(detail.Attempts) != 1 || detail.Attempts[0].AccountID == nil || *detail.Attempts[0].AccountID != first.ID {
 		t.Fatalf("audit detail = %#v, err = %v", detail, err)
 	}
 	ownership, err := responseRepo.Get(ctx, "resp-test", clientKey.ID, time.Now().UTC())
@@ -304,6 +304,220 @@ func TestSelectConversationRouteRespectsClientKeyAcrossSharedPublicModel(t *test
 	if err != nil || selected.ID != 20 {
 		t.Fatalf("selected route = %#v, err = %v", selected, err)
 	}
+}
+
+func TestListConversationRoutesOrdersBuildBeforeConsole(t *testing.T) {
+	registry := provider.NewRegistry(&failoverAdapter{}, statelessConsoleAdapter{})
+	service := &Service{
+		clientKeys: clientkeyapp.NewService(nil, nil, nil, 60, 4, nil),
+		providers:  registry,
+	}
+	routes := []modeldomain.Route{
+		{ID: 10, PublicID: "Build/grok-shared", Provider: account.ProviderBuild, UpstreamModel: "grok-shared"},
+		{ID: 20, PublicID: "Console/grok-shared", Provider: account.ProviderConsole, UpstreamModel: "grok-shared"},
+	}
+	eligible, err := service.listConversationRoutes(routes, clientkey.Key{}, audit.OperationResponses, "/responses", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(eligible) != 2 || eligible[0].Provider != account.ProviderBuild || eligible[1].Provider != account.ProviderConsole {
+		t.Fatalf("eligible = %#v", eligible)
+	}
+}
+
+func TestCreateResponseFallsAcrossProviders(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "cross-provider-failover.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	buildAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-shared", SourceKey: "build-shared",
+		EncryptedAccessToken: "build-token", ExpiresAt: time.Now().Add(time.Hour), Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: "console-shared", SourceKey: "console-shared",
+		EncryptedAccessToken: "console-token", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{
+		{PublicID: "grok-shared-failover", Provider: account.ProviderBuild, UpstreamModel: "grok-shared-failover", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{PublicID: "grok-shared-failover", Provider: account.ProviderConsole, UpstreamModel: "grok-shared-failover", Capability: modeldomain.CapabilityResponses, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-shared-failover"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, consoleAccount.ID, []string{"grok-shared-failover"}, now); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "cross-provider-key", Prefix: "cross", SecretHash: strings.Repeat("a", 64), EncryptedSecret: "encrypted-key",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildAdapter := &crossProviderBuildAdapter{accountID: buildAccount.ID}
+	consoleAdapter := &crossProviderConsoleAdapter{accountID: consoleAccount.ID}
+	registry := provider.NewRegistry(buildAdapter, consoleAdapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	result, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-cross-provider", ClientKey: key, PublicModel: "grok-shared-failover",
+		Body: []byte(`{"model":"grok-shared-failover","input":"hello"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Finalize(Usage{}, "resp-cross", "")
+	_ = result.Body.Close()
+	if string(body) != "console-ok" {
+		t.Fatalf("body = %q", body)
+	}
+	if !buildAdapter.called.Load() {
+		t.Fatal("build adapter was not attempted")
+	}
+	if !consoleAdapter.called.Load() {
+		t.Fatal("console adapter was not attempted")
+	}
+	logs, total, err := auditRepo.List(ctx, 0, 10)
+	if err != nil || total != 1 || logs[0].Provider != string(account.ProviderConsole) || logs[0].AttemptCount < 1 {
+		t.Fatalf("audit = %#v total=%d err=%v", logs, total, err)
+	}
+	detail, err := auditRepo.Get(ctx, logs[0].ID)
+	if err != nil || len(detail.Attempts) < 1 || detail.Attempts[0].AccountID == nil || *detail.Attempts[0].AccountID != buildAccount.ID {
+		t.Fatalf("cross-provider attempts = %#v err=%v", detail, err)
+	}
+}
+
+func TestCreateResponsePrefixedModelDoesNotHopProvider(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "prefixed-no-hop.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	auditRepo := relational.NewAuditRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	buildAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderBuild, Name: "build-prefixed", SourceKey: "build-prefixed",
+		EncryptedAccessToken: "build-token", ExpiresAt: time.Now().Add(time.Hour), Enabled: true,
+		AuthStatus: account.AuthStatusActive, Priority: 200, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleAccount, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderConsole, AuthType: account.AuthTypeSSO, Name: "console-prefixed", SourceKey: "console-prefixed",
+		EncryptedAccessToken: "console-token", Enabled: true, AuthStatus: account.AuthStatusActive, Priority: 100, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.UpsertRoutes(ctx, []modeldomain.Route{
+		{PublicID: "grok-shared-failover", Provider: account.ProviderBuild, UpstreamModel: "grok-shared-failover", Capability: modeldomain.CapabilityResponses, Enabled: true},
+		{PublicID: "grok-shared-failover", Provider: account.ProviderConsole, UpstreamModel: "grok-shared-failover", Capability: modeldomain.CapabilityResponses, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, buildAccount.ID, []string{"grok-shared-failover"}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, consoleAccount.ID, []string{"grok-shared-failover"}, now); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "prefixed-key", Prefix: "pref", SecretHash: strings.Repeat("b", 64), EncryptedSecret: "encrypted-key",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildAdapter := &crossProviderBuildAdapter{accountID: buildAccount.ID}
+	consoleAdapter := &crossProviderConsoleAdapter{accountID: consoleAccount.ID}
+	registry := provider.NewRegistry(buildAdapter, consoleAdapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, auditRepo, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	service := NewService(modelRepo, auditRepo, accountService, clientkeyapp.NewService(nil, nil, nil, 60, 4, nil), registry, selector, responseRepo, 3)
+	_, err = service.CreateResponse(ctx, Input{
+		RequestID: "req-prefixed", ClientKey: key, PublicModel: "Build/grok-shared-failover",
+		Body: []byte(`{"model":"Build/grok-shared-failover","input":"hello"}`),
+	})
+	if err == nil {
+		t.Fatal("expected build-only failure")
+	}
+	if !buildAdapter.called.Load() {
+		t.Fatal("build adapter was not attempted")
+	}
+	if consoleAdapter.called.Load() {
+		t.Fatal("console adapter was called for prefixed model")
+	}
+}
+
+type crossProviderBuildAdapter struct {
+	accountID uint64
+	called    atomic.Bool
+}
+
+func (a *crossProviderBuildAdapter) Provider() account.Provider { return account.ProviderBuild }
+func (a *crossProviderBuildAdapter) Definition() provider.Definition {
+	return testConversationDefinition(account.ProviderBuild)
+}
+func (a *crossProviderBuildAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	return &provider.Response{
+		StatusCode: http.StatusTooManyRequests, Status: "429 Too Many Requests", Header: make(http.Header),
+		Body: io.NopCloser(strings.NewReader(`{"error":"build limited"}`)),
+	}, nil
+}
+
+type crossProviderConsoleAdapter struct {
+	accountID uint64
+	called    atomic.Bool
+}
+
+func (a *crossProviderConsoleAdapter) Provider() account.Provider { return account.ProviderConsole }
+func (a *crossProviderConsoleAdapter) Definition() provider.Definition {
+	return testConversationDefinition(account.ProviderConsole)
+}
+func (a *crossProviderConsoleAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
+	a.called.Store(true)
+	return &provider.Response{
+		StatusCode: http.StatusOK, Status: "200 OK", Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(strings.NewReader("console-ok")),
+	}, nil
 }
 
 func TestSelectMediaRouteSkipsSameNamedConversationRoute(t *testing.T) {

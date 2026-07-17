@@ -58,7 +58,7 @@ func buildOfficialTokenPrices() map[string]tokenPrice {
 	register("grok-4.5", tokenPrice{InputTicks: 20000, CachedInputTicks: 5000, OutputTicks: 60000, LongContextTokens: 200000, LongInputTicks: 40000, LongCachedTicks: 10000, LongOutputTicks: 120000},
 		"grok-4.5-latest", "grok-build-latest")
 	standard := tokenPrice{InputTicks: 12500, CachedInputTicks: 2000, OutputTicks: 25000, LongContextTokens: 200000, LongInputTicks: 25000, LongCachedTicks: 4000, LongOutputTicks: 50000}
-	register("grok-4.3", standard, "grok-4.3-latest", "grok-latest")
+	register("grok-4.3", standard, "grok-4.3-latest", "grok-latest", "grok-3-mini", "grok-3-mini-fast")
 	register("grok-4.20-multi-agent-0309", standard,
 		"grok-4.20-multi-agent", "grok-4.20-multi-agent-latest", "grok-4.20-multi-agent-beta-latest", "grok-4.20-multi-agent-beta-0309")
 	register("grok-4.20-0309-reasoning", standard,
@@ -240,7 +240,11 @@ func EstimateOfficialImageEditCost(model, resolution string, outputCount, inputC
 
 // EstimateOfficialVideoCost 按请求视频时长和分辨率计算费用。
 func EstimateOfficialVideoCost(model, resolution string, seconds int) (PricingResult, bool) {
-	if normalizePricingModel(model) != "grok-imagine-video" || seconds <= 0 {
+	normalized := normalizePricingModel(model)
+	if normalized == "grok-imagine-video-1.5-preview" {
+		normalized = "grok-imagine-video"
+	}
+	if normalized != "grok-imagine-video" || seconds <= 0 {
 		return PricingResult{}, false
 	}
 	resolution = strings.ToLower(strings.TrimSpace(resolution))

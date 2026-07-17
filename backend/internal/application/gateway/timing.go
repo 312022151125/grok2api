@@ -28,6 +28,16 @@ func newGenerationTiming(route string, provider accountdomain.Provider) *generat
 	return &generationTiming{started: time.Now(), route: route, provider: provider}
 }
 
+func (t *generationTiming) setRoute(route string, provider accountdomain.Provider) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.route = route
+	t.provider = provider
+	t.mu.Unlock()
+}
+
 func (t *generationTiming) markSelection(duration time.Duration) {
 	t.mu.Lock()
 	t.selectionWait += duration

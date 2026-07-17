@@ -140,4 +140,8 @@ func TestEstimateOfficialVideoCost(t *testing.T) {
 	if result, ok = EstimateOfficialVideoCost("grok-imagine-video", "1080p", 10); ok || result.CostInUSDTicks != 0 {
 		t.Fatalf("unpriced video resolution = %#v, ok = %v", result, ok)
 	}
+	result, ok = EstimateOfficialVideoCost("grok-imagine-video-1.5-preview", "480p", 10)
+	if !ok || result.Model != "grok-imagine-video-480p" || result.CostInUSDTicks != 8_000_000_000 {
+		t.Fatalf("preview video result = %#v, ok = %v", result, ok)
+	}
 }
