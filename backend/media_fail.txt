@@ -1,0 +1,6 @@
+Go test: 0 passed, 1 failed in 1 packages
+
+media (0 passed, 1 failed)
+  [FAIL] TestPublicVideoAssetSupportsGetHeadAndRange
+     handler_test.go:92: 同步视频文件: sync C:\Users\huynh\AppData\Local\Temp\TestPublicVideoAssetSupportsGe...
+[full output: ~/AppData\Local\rtk\tee\1784345432_go_test.log]

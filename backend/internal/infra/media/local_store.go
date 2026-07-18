@@ -87,14 +87,15 @@ func (s *LocalStore) CommitVideoUpload(ctx context.Context, tempPath, storageKey
 	if err != nil {
 		return err
 	}
-	// 确保临时文件已落盘。
-	file, err := os.Open(tempPath)
+	// Ensure the temporary file is durable before hard-link commit.
+	// Windows rejects Sync on a read-only handle (os.Open); open RDWR.
+	file, err := os.OpenFile(tempPath, os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("打开视频临时文件: %w", err)
+		return fmt.Errorf("open video temporary file: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("同步视频文件: %w", err)
+		return fmt.Errorf("sync video file: %w", err)
 	}
 	if err := file.Close(); err != nil {
 		return err
