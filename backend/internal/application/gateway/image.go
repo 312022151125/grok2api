@@ -225,6 +225,14 @@ attemptRound:
 			response, err = execute(ctx, route.Provider, credential, route.UpstreamModel)
 			if err != nil {
 				s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
+				if isSSOCredentialRejected(err, credential) {
+					s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+					failedCredential := credential
+					lastCredentialFailure = &failedCredential
+					lastCredentialError = provider.ErrUnauthorized
+					lease.Release()
+					continue
+				}
 				errorCode := "upstream_unavailable"
 				if !provider.IsMediaPostProcessingError(err) {
 					s.selector.MarkFailure(ctx, credential, 0, 0)
@@ -235,6 +243,16 @@ attemptRound:
 				lease.Release()
 				writeFailureAudit(http.StatusBadGateway, errorCode, &credential, route)
 				return nil, err
+			}
+			if response.StatusCode == http.StatusUnauthorized && credential.AuthType == accountdomain.AuthTypeSSO {
+				_, _ = readRetryableBody(response.Body)
+				s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+				failedCredential := credential
+				lastCredentialFailure = &failedCredential
+				lastCredentialError = provider.ErrUnauthorized
+				response = nil
+				lease.Release()
+				continue
 			}
 			if s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden {
 				_, _ = readRetryableBody(response.Body)
@@ -276,10 +294,6 @@ attemptRound:
 		return nil, fmt.Errorf("%w: %w", ErrNoAvailableAccount, lastCredentialError)
 	}
 	route := lastRoute
-	if response.StatusCode == http.StatusUnauthorized && credential.AuthType == accountdomain.AuthTypeSSO {
-		_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
-		s.selector.MarkFailure(ctx, credential, http.StatusUnauthorized, 0)
-	}
 	effectiveQuotaMode := lease.QuotaMode
 	accountID := credential.ID
 	var once sync.Once
