@@ -14,6 +14,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
@@ -95,6 +96,96 @@ func TestExportCredentialsRoundTripsImportFormat(t *testing.T) {
 	}
 	if len(multiProgress) != 3 || multiProgress[0] != [2]int{0, 2} || multiProgress[2] != [2]int{2, 2} {
 		t.Fatalf("multi-file import progress = %#v", multiProgress)
+	}
+}
+
+func TestExportWebCredentialsRoundTripsImportFormat(t *testing.T) {
+	ctx := context.Background()
+	sourceDB, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sourceDB.Close()
+	targetDB, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "target.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer targetDB.Close()
+	for _, database := range []*relational.Database{sourceDB, targetDB} {
+		if err := database.InitializeSchema(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssoCiphertext, err := cipher.Encrypt("sso-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieCiphertext, err := cipher.Encrypt("cf_clearance=clear; __cf_bm=bm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceRepository := relational.NewAccountRepository(sourceDB)
+	if _, _, err := sourceRepository.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		Name: "web primary", SourceKey: "sso:web-export-test", WebTier: accountdomain.WebTierSuper,
+		EncryptedAccessToken: ssoCiphertext, EncryptedCloudflareCookie: cookieCiphertext,
+		Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourceService := NewService(sourceRepository, nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	targetRepository := relational.NewAccountRepository(targetDB)
+	targetService := NewService(targetRepository, nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+
+	result, err := sourceService.ExportWebCredentials(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetResult, err := targetService.ImportWebCredentialDocumentsWithProgress(ctx, [][]byte{result.Data}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Count != 1 || targetResult.Created != 1 || len(targetResult.AccountIDs) != 1 {
+		t.Fatalf("export = %#v, import = %#v", result, targetResult)
+	}
+	value, err := targetRepository.Get(ctx, targetResult.AccountIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssoToken, err := cipher.Decrypt(value.EncryptedAccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookies, err := cipher.Decrypt(value.EncryptedCloudflareCookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.Name != "web primary" || value.WebTier != accountdomain.WebTierSuper || ssoToken != "sso-token" || cookies != "cf_clearance=clear; __cf_bm=bm" {
+		t.Fatalf("round-trip credential = %#v, sso = %q, cookies = %q", value, ssoToken, cookies)
+	}
+}
+
+func TestExportWebCredentialsEmpty(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "empty-web-export.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(relational.NewAccountRepository(database), nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	if _, err := service.ExportWebCredentials(ctx); !errors.Is(err, ErrExportEmpty) {
+		t.Fatalf("error = %v, want ErrExportEmpty", err)
 	}
 }
 

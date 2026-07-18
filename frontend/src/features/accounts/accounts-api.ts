@@ -450,6 +450,10 @@ export function exportCLIProxyAccounts(): Promise<{ blob: Blob; filename: string
   return apiDownloadWithFilename("/api/admin/v1/accounts/export/cliproxyapi");
 }
 
+export function exportWebAccounts(): Promise<{ blob: Blob; filename: string }> {
+  return apiDownloadWithFilename("/api/admin/v1/accounts/web/export");
+}
+
 export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ updated: number }> {
   return apiRequest("/api/admin/v1/accounts/batch", { method: "PATCH", body: { ids, enabled, provider } }, decodeCountResult<{ updated: number }>("updated"));
 }

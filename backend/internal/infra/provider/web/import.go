@@ -23,7 +23,7 @@ type importDocument struct {
 type importEntry struct {
 	Name              string `json:"name"`
 	SSOToken          string `json:"sso_token"`
-	Token             string `json:"token"`
+	Token             string `json:"token,omitempty"`
 	Tier              string `json:"tier"`
 	CloudflareCookies string `json:"cloudflare_cookies"`
 }
@@ -116,7 +116,7 @@ func parsePlainTextCredentials(value string) ([]provider.CredentialSeed, error) 
 func (a *Adapter) MarshalCredentials(values []provider.CredentialSeed) ([]byte, error) {
 	document := importDocument{Provider: string(account.ProviderWeb), Accounts: make([]importEntry, 0, len(values))}
 	for _, value := range values {
-		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, SSOToken: value.AccessToken, Tier: string(value.WebTier)})
+		document.Accounts = append(document.Accounts, importEntry{Name: value.Name, SSOToken: value.AccessToken, Tier: string(value.WebTier), CloudflareCookies: value.CloudflareCookies})
 	}
 	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {

@@ -30,7 +30,7 @@ var (
 	ErrInvalidImport  = errors.New("Invalid account credential format")
 	ErrImportLimit    = errors.New("Import account count exceeds the limit")
 	ErrExportLimit    = errors.New("Export account count exceeds the limit")
-	ErrExportEmpty    = errors.New("No Grok Build accounts available to export")
+	ErrExportEmpty    = errors.New("No accounts available to export")
 	ErrNotFound       = errors.New("Account not found")
 	ErrUnsupported    = errors.New("This operation is not supported for the account source")
 	ErrConversionBusy = errors.New("Account is already converting to Grok Build")
@@ -1321,6 +1321,55 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 			Name: value.Name, Email: value.Email, UserID: value.UserID, TeamID: value.TeamID,
 			OIDCClientID: value.OIDCClientID, AccessToken: accessToken, RefreshToken: refreshToken, ExpiresAt: value.ExpiresAt,
 		})
+	}
+	data, err := adapter.MarshalCredentials(seeds)
+	if err != nil {
+		return ExportResult{}, err
+	}
+	return ExportResult{Data: data, Count: len(seeds)}, nil
+}
+
+// ExportWebCredentials 导出可由当前 Web 导入接口重新读取的 Grok Web SSO 凭据文档。
+func (s *Service) ExportWebCredentials(ctx context.Context) (ExportResult, error) {
+	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderWeb)
+	if !ok {
+		return ExportResult{}, fmt.Errorf("Grok Web Provider 未注册")
+	}
+	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
+		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
+		Filter: repository.AccountListFilter{Provider: string(accountdomain.ProviderWeb), Now: s.now()},
+	})
+	if err != nil {
+		return ExportResult{}, err
+	}
+	if total > maxCredentialExportAccounts {
+		return ExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
+	}
+	seeds := make([]provider.CredentialSeed, 0, len(values))
+	for _, value := range values {
+		if value.Provider != accountdomain.ProviderWeb {
+			continue
+		}
+		ssoToken, err := s.cipher.Decrypt(value.EncryptedAccessToken)
+		if err != nil {
+			return ExportResult{}, fmt.Errorf("解密账号 %d Grok Web SSO: %w", value.ID, err)
+		}
+		if strings.TrimSpace(ssoToken) == "" {
+			return ExportResult{}, fmt.Errorf("账号 %d 没有可导出的 Grok Web SSO 凭据", value.ID)
+		}
+		cookies := ""
+		if strings.TrimSpace(value.EncryptedCloudflareCookie) != "" {
+			cookies, err = s.cipher.Decrypt(value.EncryptedCloudflareCookie)
+			if err != nil {
+				return ExportResult{}, fmt.Errorf("解密账号 %d Grok Web Cloudflare Cookie: %w", value.ID, err)
+			}
+		}
+		seeds = append(seeds, provider.CredentialSeed{
+			Name: value.Name, AccessToken: ssoToken, WebTier: value.WebTier, CloudflareCookies: cookies,
+		})
+	}
+	if len(seeds) == 0 {
+		return ExportResult{}, ErrExportEmpty
 	}
 	data, err := adapter.MarshalCredentials(seeds)
 	if err != nil {

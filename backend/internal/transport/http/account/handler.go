@@ -134,6 +134,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts/summary", h.summary)
 	router.GET("/accounts/export", h.exportCredentials)
 	router.GET("/accounts/export/cliproxyapi", h.exportCLIProxyCredentials)
+	router.GET("/accounts/web/export", h.exportWebCredentials)
 	router.GET("/accounts/:id", h.get)
 	router.POST("/accounts/device/start", h.startDevice)
 	router.POST("/accounts/device/:sessionId/poll", h.pollDevice)
@@ -901,6 +902,21 @@ func (h *Handler) exportCredentials(c *gin.Context) {
 		return
 	}
 	filename := "grok2api-accounts-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Exported-Accounts", strconv.Itoa(result.Count))
+	c.Data(http.StatusOK, "application/json; charset=utf-8", result.Data)
+}
+
+func (h *Handler) exportWebCredentials(c *gin.Context) {
+	result, err := h.service.ExportWebCredentials(c.Request.Context())
+	if err != nil {
+		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "Failed to export accounts")
+		return
+	}
+	filename := "grok2api-web-accounts-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
 	c.Header("Cache-Control", "no-store")
 	c.Header("Pragma", "no-cache")
 	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)

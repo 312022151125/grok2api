@@ -39,6 +39,7 @@ import {
   enableWebAccountNSFW,
   convertWebAccountsToBuild,
   exportAccounts,
+  exportWebAccounts,
   exportCLIProxyAccounts,
   getAccountSummary,
   importAccounts,
@@ -111,6 +112,7 @@ export function AccountsPage() {
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportCLIProxyOpen, setExportCLIProxyOpen] = useState(false);
+  const [exportWebOpen, setExportWebOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [conversionTargets, setConversionTargets] = useState<string[] | "all" | null>(null);
@@ -422,6 +424,16 @@ export function AccountsPage() {
       downloadBlob(blob, filename);
       setExportCLIProxyOpen(false);
       toast.success(t("accounts.exportedCLIProxy"));
+    },
+    onError: showError,
+  });
+
+  const exportWebMutation = useMutation({
+    mutationFn: exportWebAccounts,
+    onSuccess: ({ blob, filename }) => {
+      downloadBlob(blob, filename);
+      setExportWebOpen(false);
+      toast.success(t("accounts.exportedWeb"));
     },
     onError: showError,
   });
@@ -752,6 +764,12 @@ export function AccountsPage() {
                         <DropdownMenuItem onClick={() => setExportCLIProxyOpen(true)}><Download />{t("accounts.exportCLIProxyAuth")}</DropdownMenuItem>
                       </>
                     ) : null}
+                    {hasProviderAccounts && provider === "grok_web" ? (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => setExportWebOpen(true)}><Download />{t("accounts.exportWebAuth")}</DropdownMenuItem>
+                      </>
+                    ) : null}
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -925,6 +943,13 @@ export function AccountsPage() {
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportCLIProxyTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportCLIProxyDescription")}</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportCLIProxyMutation.isPending} onClick={() => exportCLIProxyMutation.mutate()}>{t("accounts.exportCLIProxyAuth")}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={exportWebOpen} onOpenChange={setExportWebOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportWebTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportWebDescription")}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportWebMutation.isPending} onClick={(event) => { event.preventDefault(); exportWebMutation.mutate(); }}>{t("accounts.exportWebAuth")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 

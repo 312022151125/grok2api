@@ -3,9 +3,11 @@ package account
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"mime/multipart"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +16,10 @@ import (
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
 	accountsyncapp "github.com/chenyme/grok2api/backend/internal/application/accountsync"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
+	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/gin-gonic/gin"
 )
 
@@ -211,5 +217,63 @@ func TestAccountSyncPipelineUsesFinalQueuedTotal(t *testing.T) {
 		if value[1] != 3 {
 			t.Fatalf("progress contains changing total: %#v", progress)
 		}
+	}
+}
+
+func TestExportWebCredentialsDownload(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "web-export.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ssoCiphertext, err := cipher.Encrypt("sso-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookieCiphertext, err := cipher.Encrypt("cf_clearance=clear; __cf_bm=bm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := relational.NewAccountRepository(database)
+	if _, _, err := repository.UpsertByIdentity(ctx, accountdomain.Credential{
+		Provider: accountdomain.ProviderWeb, AuthType: accountdomain.AuthTypeSSO,
+		Name: "web primary", SourceKey: "sso:web-export-test", WebTier: accountdomain.WebTierSuper,
+		EncryptedAccessToken: ssoCiphertext, EncryptedCloudflareCookie: cookieCiphertext,
+		Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := accountapp.NewService(repository, nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	router := gin.New()
+	NewHandler(service, nil).Register(router.Group("/api/admin/v1"))
+
+	request := httptest.NewRequest("GET", "/api/admin/v1/accounts/web/export", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != 200 {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	values, err := (&web.Adapter{}).ParseImportedCredentials(recorder.Body.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].Name != "web primary" || values[0].AccessToken != "sso-token" || values[0].WebTier != accountdomain.WebTierSuper || values[0].CloudflareCookies != "cf_clearance=clear; __cf_bm=bm" {
+		t.Fatalf("exported values = %#v", values)
+	}
+	headers := recorder.Header()
+	if headers.Get("Content-Type") != "application/json; charset=utf-8" || headers.Get("Cache-Control") != "no-store" || headers.Get("Pragma") != "no-cache" || headers.Get("X-Content-Type-Options") != "nosniff" || headers.Get("X-Exported-Accounts") != "1" {
+		t.Fatalf("download headers = %#v", headers)
+	}
+	disposition := headers.Get("Content-Disposition")
+	if !strings.HasPrefix(disposition, `attachment; filename="grok2api-web-accounts-`) || !strings.HasSuffix(disposition, `.json"`) {
+		t.Fatalf("content disposition = %q", disposition)
 	}
 }

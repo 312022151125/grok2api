@@ -93,6 +93,16 @@ func TestSystemEndpointsRequireAdminAuthentication(t *testing.T) {
 	}
 }
 
+func TestAccountExportRouteRequiresAdminAuthentication(t *testing.T) {
+	router := New(testDependencies())
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/v1/accounts/web/export", nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestFrontendStaticFilesAndSPAFallback(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "assets"), 0o755); err != nil {
