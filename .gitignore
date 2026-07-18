@@ -44,3 +44,5 @@ Thumbs.db
 /release/
 /.tmp/
 /tmp/
+
+.worktrees/
