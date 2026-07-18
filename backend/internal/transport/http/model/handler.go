@@ -85,7 +85,7 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "modelListFailed", "读取模型失败")
+		response.Error(c, http.StatusInternalServerError, "modelListFailed", "Failed to load models")
 		return
 	}
 	items := make([]modelResponse, 0, len(values))
@@ -111,7 +111,7 @@ func (h *Handler) listAccounts(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var request createRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	accountIDs, err := parseIDs(request.AccountIDs)
@@ -133,14 +133,14 @@ func (h *Handler) create(c *gin.Context) {
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids := make([]uint64, 0, len(request.IDs))
 	for _, value := range request.IDs {
 		id, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || id == 0 {
-			response.Error(c, http.StatusBadRequest, "invalidId", fmt.Sprintf("无效模型 ID: %s", value))
+			response.Error(c, http.StatusBadRequest, "invalidId", fmt.Sprintf("Invalid model ID: %s", value))
 			return
 		}
 		ids = append(ids, id)
@@ -156,7 +156,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -175,7 +175,7 @@ func (h *Handler) batchDelete(c *gin.Context) {
 func (h *Handler) sync(c *gin.Context) {
 	count, err := h.service.Sync(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusBadGateway, "modelSyncFailed", "同步上游模型失败")
+		response.Error(c, http.StatusBadGateway, "modelSyncFailed", "Failed to sync upstream models")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"synced": count})
@@ -184,12 +184,12 @@ func (h *Handler) sync(c *gin.Context) {
 func (h *Handler) update(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid ID")
 		return
 	}
 	var request updateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	var accountIDs *[]uint64
@@ -212,7 +212,7 @@ func (h *Handler) update(c *gin.Context) {
 func (h *Handler) delete(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid ID")
 		return
 	}
 	if err := h.service.Delete(c.Request.Context(), id); err != nil {
@@ -232,7 +232,7 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error) {
 	case errors.Is(err, modelapp.ErrConflict):
 		response.Error(c, http.StatusConflict, "modelConflict", err.Error())
 	default:
-		response.Error(c, http.StatusInternalServerError, code, "模型操作失败")
+		response.Error(c, http.StatusInternalServerError, code, "Model operation failed")
 	}
 }
 
@@ -257,7 +257,7 @@ func parseIDs(values []string) ([]uint64, error) {
 	for _, value := range values {
 		id, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || id == 0 {
-			return nil, fmt.Errorf("无效 ID: %s", value)
+			return nil, fmt.Errorf("invalid ID: %s", value)
 		}
 		ids = append(ids, id)
 	}

@@ -60,7 +60,7 @@ func (value nodeRequest) input() egressapp.Input {
 func (h *Handler) list(c *gin.Context) {
 	scope := egressdomain.Scope(c.Query("scope"))
 	if scope != "" && scope != egressdomain.ScopeBuild && scope != egressdomain.ScopeWeb && scope != egressdomain.ScopeConsole && scope != egressdomain.ScopeWebAsset {
-		response.Error(c, http.StatusBadRequest, "invalidEgressScope", "scope 必须是 grok_build、grok_web、grok_console 或 grok_web_asset")
+		response.Error(c, http.StatusBadRequest, "invalidEgressScope", "scope must be grok_build, grok_web, grok_console, or grok_web_asset")
 		return
 	}
 	values, err := h.service.List(c.Request.Context(), scope, repository.SortQuery{Field: c.Query("sortBy"), Direction: repository.SortDirection(c.Query("sortOrder"))})
@@ -69,7 +69,7 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "egressNodeListFailed", "读取代理节点失败")
+		response.Error(c, http.StatusInternalServerError, "egressNodeListFailed", "Failed to load egress nodes")
 		return
 	}
 	items := make([]nodeResponse, 0, len(values))
@@ -82,7 +82,7 @@ func (h *Handler) list(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var request nodeRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	value, err := h.service.Create(c.Request.Context(), request.input())
@@ -100,7 +100,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var request nodeRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	value, err := h.service.Update(c.Request.Context(), id, request.input())
@@ -138,14 +138,14 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 	case errors.Is(err, egressapp.ErrNotFound):
 		response.Error(c, http.StatusNotFound, "egressNodeNotFound", err.Error())
 	default:
-		response.Error(c, http.StatusInternalServerError, "egressNodeOperationFailed", "代理节点操作失败")
+		response.Error(c, http.StatusInternalServerError, "egressNodeOperationFailed", "Egress node operation failed")
 	}
 }
 
 func pathID(c *gin.Context) (uint64, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid ID")
 		return 0, false
 	}
 	return id, true

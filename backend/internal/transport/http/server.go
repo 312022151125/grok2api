@@ -165,7 +165,7 @@ func New(deps Dependencies) *gin.Engine {
 				return
 			}
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"code": "service_reconciling", "message": "服务正在完成启动恢复，请稍后重试", "param": nil, "type": "server_error",
+				"code": "service_reconciling", "message": "Service is finishing startup recovery. Please retry shortly.", "param": nil, "type": "server_error",
 			}})
 		})
 	}

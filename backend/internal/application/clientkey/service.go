@@ -15,17 +15,17 @@ import (
 )
 
 var (
-	ErrInvalidKey         = errors.New("客户端 API Key 无效")
-	ErrModelNotAllowed    = errors.New("客户端 API Key 无权使用该模型")
-	ErrRateLimited        = errors.New("客户端 API Key 已超过 RPM 限制")
-	ErrConcurrencyLimit   = errors.New("客户端 API Key 已达到并发上限")
-	ErrBillingLimit       = errors.New("客户端 API Key 已达到用量上限")
-	ErrRuntimeUnavailable = errors.New("运行态存储暂不可用")
-	ErrInvalidFilter      = errors.New("客户端 Key 筛选条件无效")
-	ErrInvalidInput       = errors.New("客户端 Key 参数无效")
-	ErrNotFound           = errors.New("客户端 Key 不存在")
-	ErrConflict           = errors.New("客户端 Key 冲突")
-	ErrSecretUnavailable  = errors.New("客户端 Key 明文不可用")
+	ErrInvalidKey         = errors.New("Invalid client API key")
+	ErrModelNotAllowed    = errors.New("Client API key is not allowed to use this model")
+	ErrRateLimited        = errors.New("Client API key exceeded the RPM limit")
+	ErrConcurrencyLimit   = errors.New("Client API key reached the concurrency limit")
+	ErrBillingLimit       = errors.New("Client API key reached the usage limit")
+	ErrRuntimeUnavailable = errors.New("Runtime store is temporarily unavailable")
+	ErrInvalidFilter      = errors.New("Invalid client key filter")
+	ErrInvalidInput       = errors.New("Invalid client key parameters")
+	ErrNotFound           = errors.New("Client key not found")
+	ErrConflict           = errors.New("Client key conflict")
+	ErrSecretUnavailable  = errors.New("Client key secret is unavailable")
 )
 
 type CreateInput struct {
@@ -112,16 +112,16 @@ func validListFilter(value string, allowed ...string) bool {
 // Create 创建客户端 Key；哈希用于鉴权，加密副本仅供管理员按需再次复制。
 func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error) {
 	if strings.TrimSpace(input.Name) == "" {
-		return Created{}, invalidInput("Key 名称不能为空")
+		return Created{}, invalidInput("Key name cannot be empty")
 	}
 	if input.RPMLimit < 0 || input.RPMLimit > clientkeydomain.MaxRPMLimit {
-		return Created{}, invalidInput("rpmLimit 必须在 0 到 100000 之间")
+		return Created{}, invalidInput("rpmLimit must be between 0 and 100000")
 	}
 	if input.MaxConcurrent < 0 || input.MaxConcurrent > clientkeydomain.MaxConcurrent {
-		return Created{}, invalidInput("maxConcurrent 必须在 0 到 1024 之间")
+		return Created{}, invalidInput("maxConcurrent must be between 0 and 1024")
 	}
 	if input.BillingLimitUSDTicks < 0 || input.BillingLimitUSDTicks > clientkeydomain.MaxBillingLimitTicks {
-		return Created{}, invalidInput("billingLimitUsdTicks 超出允许范围")
+		return Created{}, invalidInput("billingLimitUsdTicks is out of range")
 	}
 	prefix, err := security.NewHexToken(6)
 	if err != nil {
@@ -133,11 +133,11 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 	}
 	raw := security.FormatClientKey(prefix, secretPart)
 	if s.cipher == nil {
-		return Created{}, errors.New("客户端 Key 加密器未配置")
+		return Created{}, errors.New("client key cipher is not configured")
 	}
 	encryptedSecret, err := s.cipher.Encrypt(raw)
 	if err != nil {
-		return Created{}, fmt.Errorf("加密客户端 Key: %w", err)
+		return Created{}, fmt.Errorf("encrypt client key: %w", err)
 	}
 	if input.RPMLimit == 0 {
 		input.RPMLimit = int(s.defaultRPM.Load())
@@ -146,7 +146,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Created, error
 		input.MaxConcurrent = int(s.defaultMax.Load())
 	}
 	if input.RPMLimit < 1 || input.MaxConcurrent < 1 {
-		return Created{}, invalidInput("RPM 和最大并发必须大于零")
+		return Created{}, invalidInput("RPM and max concurrent must be greater than zero")
 	}
 	value, err := s.keys.Create(ctx, clientkeydomain.Key{Name: strings.TrimSpace(input.Name), Prefix: prefix, SecretHash: security.HashToken(raw), EncryptedSecret: encryptedSecret, Enabled: input.Enabled, ExpiresAt: input.ExpiresAt, RPMLimit: input.RPMLimit, MaxConcurrent: input.MaxConcurrent, BillingLimitUSDTicks: input.BillingLimitUSDTicks, AllowedModels: input.AllowedModels})
 	return Created{Key: value, Secret: raw}, mapRepositoryError(err)
@@ -163,11 +163,11 @@ func (s *Service) RevealSecret(ctx context.Context, id uint64) (string, error) {
 	}
 	raw, err := s.cipher.Decrypt(value.EncryptedSecret)
 	if err != nil {
-		return "", fmt.Errorf("解密客户端 Key: %w", err)
+		return "", fmt.Errorf("decrypt client key: %w", err)
 	}
 	prefix, ok := security.SplitClientKey(raw)
 	if !ok || prefix != value.Prefix || subtle.ConstantTimeCompare([]byte(security.HashToken(raw)), []byte(value.SecretHash)) != 1 {
-		return "", errors.New("客户端 Key 加密副本校验失败")
+		return "", errors.New("client key encrypted secret failed validation")
 	}
 	return raw, nil
 }
@@ -180,7 +180,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (cli
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
-			return clientkeydomain.Key{}, invalidInput("Key 名称不能为空")
+			return clientkeydomain.Key{}, invalidInput("Key name cannot be empty")
 		}
 	}
 	if input.Enabled != nil {
@@ -193,19 +193,19 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (cli
 	}
 	if input.RPMLimit != nil {
 		if *input.RPMLimit < 1 || *input.RPMLimit > clientkeydomain.MaxRPMLimit {
-			return clientkeydomain.Key{}, invalidInput("rpmLimit 必须在 1 到 100000 之间")
+			return clientkeydomain.Key{}, invalidInput("rpmLimit must be between 1 and 100000")
 		}
 		value.RPMLimit = *input.RPMLimit
 	}
 	if input.MaxConcurrent != nil {
 		if *input.MaxConcurrent < 1 || *input.MaxConcurrent > clientkeydomain.MaxConcurrent {
-			return clientkeydomain.Key{}, invalidInput("maxConcurrent 必须在 1 到 1024 之间")
+			return clientkeydomain.Key{}, invalidInput("maxConcurrent must be between 1 and 1024")
 		}
 		value.MaxConcurrent = *input.MaxConcurrent
 	}
 	if input.BillingLimitUSDTicks != nil {
 		if *input.BillingLimitUSDTicks < 0 || *input.BillingLimitUSDTicks > clientkeydomain.MaxBillingLimitTicks {
-			return clientkeydomain.Key{}, invalidInput("billingLimitUsdTicks 超出允许范围")
+			return clientkeydomain.Key{}, invalidInput("billingLimitUsdTicks is out of range")
 		}
 		value.BillingLimitUSDTicks = *input.BillingLimitUSDTicks
 	}
@@ -269,7 +269,7 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 		value, err = s.keys.GetByPrefix(ctx, prefix)
 		if err != nil {
 			if !errors.Is(err, repository.ErrNotFound) {
-				return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 客户端 Key 仓储: %v", ErrRuntimeUnavailable, err)
+				return clientkeydomain.Key{}, nil, fmt.Errorf("%w: client key repository: %v", ErrRuntimeUnavailable, err)
 			}
 			return clientkeydomain.Key{}, nil, ErrInvalidKey
 		}
@@ -290,14 +290,14 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (clientkeydomain
 	}
 	allowed, err := s.rateLimiter.Allow(ctx, fmt.Sprintf("client:%d", value.ID), value.RPMLimit, now)
 	if err != nil {
-		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM 限流器: %v", ErrRuntimeUnavailable, err)
+		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: RPM rate limiter: %v", ErrRuntimeUnavailable, err)
 	}
 	if !allowed {
 		return clientkeydomain.Key{}, nil, ErrRateLimited
 	}
 	release, acquired, err := s.concurrency.Acquire(ctx, fmt.Sprintf("client:%d", value.ID), value.MaxConcurrent)
 	if err != nil {
-		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: 并发租约: %v", ErrRuntimeUnavailable, err)
+		return clientkeydomain.Key{}, nil, fmt.Errorf("%w: concurrency lease: %v", ErrRuntimeUnavailable, err)
 	}
 	if !acquired {
 		return clientkeydomain.Key{}, nil, ErrConcurrencyLimit
@@ -328,7 +328,7 @@ func (s *Service) ReserveBilling(ctx context.Context, key clientkeydomain.Key, e
 	}
 	repo, ok := s.keys.(billingReservationRepository)
 	if !ok {
-		return false, fmt.Errorf("%w: 客户端 Key 仓储不支持计费预留", ErrRuntimeUnavailable)
+		return false, fmt.Errorf("%w: client key repository does not support billing reservation", ErrRuntimeUnavailable)
 	}
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
@@ -338,7 +338,7 @@ func (s *Service) ReserveBilling(ctx context.Context, key clientkeydomain.Key, e
 		return false, ErrBillingLimit
 	}
 	if err != nil {
-		return false, fmt.Errorf("%w: 计费预留: %v", ErrRuntimeUnavailable, err)
+		return false, fmt.Errorf("%w: billing reservation: %v", ErrRuntimeUnavailable, err)
 	}
 	return reserved, nil
 }
@@ -350,7 +350,7 @@ func (s *Service) CancelBilling(ctx context.Context, eventID string) error {
 		return nil
 	}
 	if err := repo.CancelBillingReservation(ctx, eventID); err != nil {
-		return fmt.Errorf("%w: 取消计费预留: %v", ErrRuntimeUnavailable, err)
+		return fmt.Errorf("%w: cancel billing reservation: %v", ErrRuntimeUnavailable, err)
 	}
 	return nil
 }
@@ -359,7 +359,7 @@ func (s *Service) CancelBilling(ctx context.Context, eventID string) error {
 func (s *Service) CleanupExpiredBilling(ctx context.Context, limit int) (int, error) {
 	repo, ok := s.keys.(billingReservationRepository)
 	if !ok {
-		return 0, fmt.Errorf("%w: 客户端 Key 仓储不支持计费预留", ErrRuntimeUnavailable)
+		return 0, fmt.Errorf("%w: client key repository does not support billing reservation", ErrRuntimeUnavailable)
 	}
 	return repo.CleanupExpiredBillingReservations(ctx, time.Now().UTC(), limit)
 }
@@ -379,16 +379,16 @@ func normalizePage(page, pageSize int) (int, int) {
 
 func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
-		return nil, invalidInput("至少选择一个 Key")
+		return nil, invalidInput("select at least one key")
 	}
 	if len(ids) > 500 {
-		return nil, invalidInput("单次最多处理 500 个 Key")
+		return nil, invalidInput("at most 500 keys per request")
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("Key ID 无效")
+			return nil, invalidInput("invalid key ID")
 		}
 		if _, ok := seen[id]; ok {
 			continue

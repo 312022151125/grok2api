@@ -32,7 +32,7 @@ type UpstreamFailure struct {
 
 func (e *UpstreamFailure) Error() string {
 	if e == nil {
-		return "上游请求失败"
+		return "Upstream request failed"
 	}
 	if e.UpstreamCode != "" {
 		return fmt.Sprintf("%s: %s", e.Code, e.UpstreamCode)
@@ -63,7 +63,7 @@ func (e *UpstreamFailure) AuditCode() string {
 func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountName string) *UpstreamFailure {
 	upstreamCode, upstreamType, upstreamMessage := extractUpstreamErrorMetadata(body)
 	failure := &UpstreamFailure{
-		HTTPStatus: status, Code: "upstream_error", PublicMessage: "上游服务返回错误",
+		HTTPStatus: status, Code: "upstream_error", PublicMessage: "The upstream service returned an error",
 		UpstreamCode: upstreamCode, AccountID: accountID, AccountName: accountName,
 	}
 	if status < 400 || status > 599 {
@@ -73,17 +73,17 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 	switch status {
 	case http.StatusUnauthorized:
 		failure.Code = "upstream_unauthorized"
-		failure.PublicMessage = "上游账号认证失败"
+		failure.PublicMessage = "Upstream account authentication failed"
 		failure.AccountScoped = true
 		failure.CredentialRejected = true
 	case http.StatusPaymentRequired:
 		failure.Code = "upstream_payment_required"
-		failure.PublicMessage = "上游账号额度不足"
+		failure.PublicMessage = "Upstream account quota is insufficient"
 		failure.AccountScoped = true
 		failure.QuotaExhausted = true
 	case http.StatusForbidden:
 		failure.Code = "upstream_forbidden"
-		failure.PublicMessage = "上游拒绝了该请求"
+		failure.PublicMessage = "The upstream service rejected the request"
 		failure.PermanentAccountDenial = isPermanentAccountDenial(metadataText)
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.FreeQuotaExhausted = failure.ModelQuotaExhausted || isFreeQuotaExhaustion(metadataText)
@@ -92,14 +92,14 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.AccountScoped = failure.PermanentAccountDenial || failure.QuotaExhausted || failure.CredentialRejected || isAccountScopedForbidden(metadataText)
 	case http.StatusTooManyRequests:
 		failure.Code = "upstream_rate_limited"
-		failure.PublicMessage = "上游请求频率受限"
+		failure.PublicMessage = "Upstream rate limit exceeded"
 		failure.AccountScoped = true
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.FreeQuotaExhausted = failure.ModelQuotaExhausted || isFreeQuotaExhaustion(metadataText)
 		failure.QuotaExhausted = failure.FreeQuotaExhausted || isPaidQuotaExhaustion(metadataText)
 	default:
 		failure.Code = "upstream_server_error"
-		failure.PublicMessage = "上游服务暂时异常"
+		failure.PublicMessage = "The upstream service is temporarily unavailable"
 	}
 	fingerprintPart := normalizeFailureCode(firstNonEmptyFailure(upstreamCode, upstreamType, upstreamMessage))
 	if fingerprintPart == "" {
@@ -110,9 +110,9 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 }
 
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
-	code, message := "upstream_network_error", "连接上游服务失败"
+	code, message := "upstream_network_error", "Failed to connect to the upstream service"
 	if errors.Is(err, context.DeadlineExceeded) {
-		code, message = "upstream_timeout", "上游服务响应超时"
+		code, message = "upstream_timeout", "Upstream service timed out"
 	}
 	return &UpstreamFailure{
 		HTTPStatus: http.StatusBadGateway, Code: code, PublicMessage: message,
@@ -122,7 +122,7 @@ func newTransportUpstreamFailure(err error, accountID uint64, accountName string
 
 func newCredentialUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	return &UpstreamFailure{
-		HTTPStatus: http.StatusBadGateway, Code: "upstream_credential_unavailable", PublicMessage: "上游账号凭据不可用",
+		HTTPStatus: http.StatusBadGateway, Code: "upstream_credential_unavailable", PublicMessage: "Upstream account credentials are unavailable",
 		AccountID: accountID, AccountName: accountName, AccountScoped: true, Cause: err,
 	}
 }

@@ -13,12 +13,12 @@ import (
 )
 
 var (
-	ErrInvalidCredentials = errors.New("管理员账号或密码错误")
-	ErrInvalidSession     = errors.New("管理员会话无效")
-	ErrBootstrapRequired  = errors.New("首次启动需要设置管理员账号和密码")
-	ErrInvalidPassword    = errors.New("新密码至少需要 8 个字符")
-	ErrLoginRateLimited   = errors.New("管理员登录尝试过于频繁")
-	ErrRuntimeUnavailable = errors.New("管理员认证运行态暂不可用")
+	ErrInvalidCredentials = errors.New("Invalid admin username or password")
+	ErrInvalidSession     = errors.New("Invalid admin session")
+	ErrBootstrapRequired  = errors.New("Initial admin username and password must be set on first start")
+	ErrInvalidPassword    = errors.New("New password must be at least 8 characters")
+	ErrLoginRateLimited   = errors.New("Too many admin login attempts")
+	ErrRuntimeUnavailable = errors.New("Admin authentication runtime is temporarily unavailable")
 )
 
 type Tokens struct {

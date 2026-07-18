@@ -339,7 +339,7 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "accountListFailed", "读取账号失败")
+		response.Error(c, http.StatusInternalServerError, "accountListFailed", "Failed to load accounts")
 		return
 	}
 	items := make([]accountResponse, 0, len(values))
@@ -352,7 +352,7 @@ func (h *Handler) list(c *gin.Context) {
 func (h *Handler) summary(c *gin.Context) {
 	value, err := h.service.Summary(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "accountSummaryFailed", "读取账号统计失败")
+		response.Error(c, http.StatusInternalServerError, "accountSummaryFailed", "Failed to load account summary")
 		return
 	}
 	build := value.Providers[string(accountdomain.ProviderBuild)]
@@ -373,7 +373,7 @@ func (h *Handler) summary(c *gin.Context) {
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -386,7 +386,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 	}
 	updated, err := h.service.BatchUpdate(c.Request.Context(), ids, accountapp.UpdateInput{Enabled: request.Enabled, Priority: request.Priority, MaxConcurrent: request.MaxConcurrent, MinimumRemaining: request.MinimumRemaining})
 	if err != nil {
-		h.writeServiceError(c, "accountBatchUpdateFailed", err, http.StatusInternalServerError, "批量更新账号失败")
+		h.writeServiceError(c, "accountBatchUpdateFailed", err, http.StatusInternalServerError, "Failed to update accounts")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"updated": updated})
@@ -395,7 +395,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -408,7 +408,7 @@ func (h *Handler) batchDelete(c *gin.Context) {
 	}
 	deleted, err := h.service.BatchDelete(c.Request.Context(), ids)
 	if err != nil {
-		h.writeServiceError(c, "accountBatchDeleteFailed", err, http.StatusInternalServerError, "批量删除账号失败")
+		h.writeServiceError(c, "accountBatchDeleteFailed", err, http.StatusInternalServerError, "Failed to delete accounts")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"deleted": deleted})
@@ -417,7 +417,7 @@ func (h *Handler) batchDelete(c *gin.Context) {
 func (h *Handler) batchRefreshBilling(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -426,7 +426,7 @@ func (h *Handler) batchRefreshBilling(c *gin.Context) {
 		return
 	}
 	if request.Provider != string(accountdomain.ProviderBuild) {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "仅 Grok Build 账号支持 Billing 同步")
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Only Grok Build accounts support billing sync")
 		return
 	}
 	if !h.validateProviderIDs(c, ids, request.Provider) {
@@ -434,7 +434,7 @@ func (h *Handler) batchRefreshBilling(c *gin.Context) {
 	}
 	succeeded, failed, err := h.service.BatchRefreshBilling(c.Request.Context(), ids)
 	if err != nil {
-		h.writeServiceError(c, "billingBatchRefreshFailed", err, http.StatusBadGateway, "批量同步 Billing 失败")
+		h.writeServiceError(c, "billingBatchRefreshFailed", err, http.StatusBadGateway, "Failed to sync billing in batch")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
@@ -443,7 +443,7 @@ func (h *Handler) batchRefreshBilling(c *gin.Context) {
 func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -453,7 +453,7 @@ func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 	}
 	providerValue := accountdomain.Provider(request.Provider)
 	if !providerValue.IsValid() {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "账号来源无效")
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Invalid account provider")
 		return
 	}
 	if !h.validateProviderIDs(c, ids, request.Provider) {
@@ -466,7 +466,7 @@ func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 		succeeded, failed, err = h.service.BatchRefreshQuota(c.Request.Context(), ids)
 	}
 	if err != nil {
-		h.writeServiceError(c, "quotaBatchRefreshFailed", err, http.StatusBadGateway, "批量同步账号额度失败")
+		h.writeServiceError(c, "quotaBatchRefreshFailed", err, http.StatusBadGateway, "Failed to sync account quotas in batch")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
@@ -479,7 +479,7 @@ func (h *Handler) get(c *gin.Context) {
 	}
 	value, err := h.service.Get(c.Request.Context(), id)
 	if err != nil {
-		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "读取账号失败")
+		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "Failed to load accounts")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))
@@ -488,7 +488,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) startDevice(c *gin.Context) {
 	value, err := h.service.StartDeviceLogin(c.Request.Context())
 	if err != nil {
-		response.Error(c, http.StatusBadGateway, "deviceLoginStartFailed", "启动 Device OAuth 失败")
+		response.Error(c, http.StatusBadGateway, "deviceLoginStartFailed", "Failed to start Device OAuth")
 		return
 	}
 	response.Success(c, http.StatusCreated, gin.H{"sessionId": value.SessionID, "userCode": value.UserCode, "verificationUri": value.VerificationURI, "verificationUriComplete": value.VerificationURIComplete, "intervalSeconds": int(value.Interval.Seconds()), "expiresAt": value.ExpiresAt})
@@ -501,15 +501,15 @@ func (h *Handler) pollDevice(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, accountapp.ErrDeviceSlowDown) {
-		response.Error(c, http.StatusTooManyRequests, "devicePollTooFast", "轮询过快，请稍后重试")
+		response.Error(c, http.StatusTooManyRequests, "devicePollTooFast", "Polling too frequently. Please retry shortly.")
 		return
 	}
 	if errors.Is(err, accountapp.ErrDeviceDenied) {
-		response.Error(c, http.StatusGone, "deviceLoginExpired", "Device OAuth 已拒绝或过期")
+		response.Error(c, http.StatusGone, "deviceLoginExpired", "Device OAuth was denied or expired")
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusBadGateway, "deviceLoginFailed", "Device OAuth 登录失败")
+		response.Error(c, http.StatusBadGateway, "deviceLoginFailed", "Device OAuth login failed")
 		return
 	}
 	syncResult := h.syncInitial(c.Request.Context(), value.Credential.ID)
@@ -538,18 +538,18 @@ func (h *Handler) importConsoleAuth(c *gin.Context) {
 func (h *Handler) convertWebToBuild(c *gin.Context) {
 	var request buildConversionRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "转换请求无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid conversion request")
 		return
 	}
 	if request.All && len(request.IDs) > 0 {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "全部转换与指定账号不能同时提交")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Cannot submit both convert-all and specific account IDs")
 		return
 	}
 	if request.Strategy == "" {
 		request.Strategy = accountapp.BuildConversionMissing
 	}
 	if request.Strategy != accountapp.BuildConversionAll && request.Strategy != accountapp.BuildConversionMissing {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "转换策略无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid conversion strategy")
 		return
 	}
 	var ids []uint64
@@ -570,18 +570,18 @@ func (h *Handler) convertWebToBuild(c *gin.Context) {
 func (h *Handler) syncWebToConsole(c *gin.Context) {
 	var request webConsoleSyncRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "同步请求无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid sync request")
 		return
 	}
 	if request.All && len(request.IDs) > 0 {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "全部同步与指定账号不能同时提交")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Cannot submit both sync-all and specific account IDs")
 		return
 	}
 	if request.Strategy == "" {
 		request.Strategy = accountapp.WebConsoleSyncAll
 	}
 	if request.Strategy != accountapp.WebConsoleSyncAll && request.Strategy != accountapp.WebConsoleSyncMissing {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "同步策略无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid sync strategy")
 		return
 	}
 	var ids []uint64
@@ -620,7 +620,7 @@ func (h *Handler) streamWebToConsoleSync(c *gin.Context, all bool, ids []uint64,
 	var total atomic.Int64
 	result, syncResult, err := h.runWebToConsoleSync(c.Request.Context(), all, ids, strategy, stream.PhaseProgressObserver("importing", &total), stream.SyncProgressObserver())
 	if err != nil {
-		stream.WriteError("accountConsoleSyncFailed", "Grok Web 账号同步到 Console 失败")
+		stream.WriteError("accountConsoleSyncFailed", "Failed to sync Grok Web accounts to Console")
 		return
 	}
 	_ = stream.Write("complete", accountImportResponse{Created: result.Created, Updated: result.Updated, Skipped: result.Skipped, Synced: syncResult.Succeeded, SyncFailed: syncResult.Failed})
@@ -647,7 +647,7 @@ func (h *Handler) streamWebToBuildConversion(c *gin.Context, all bool, ids []uin
 	var total atomic.Int64
 	result, syncResult, err := h.runWebToBuildConversion(c.Request.Context(), all, ids, strategy, stream.PhaseProgressObserver("converting", &total), stream.SyncProgressObserver())
 	if err != nil {
-		stream.WriteError("accountConversionFailed", "Grok Web 账号转换失败")
+		stream.WriteError("accountConversionFailed", "Failed to convert Grok Web accounts")
 		return
 	}
 	_ = stream.Write("complete", newBuildConversionResponse(result, syncResult))
@@ -772,11 +772,11 @@ func writeAccountEvent(c *gin.Context, event string, value any) error {
 }
 
 func (h *Handler) importFile(c *gin.Context, providerValue accountdomain.Provider) {
-	fileDescription := "账号凭据 JSON"
+	fileDescription := "account credential JSON"
 	if providerValue == accountdomain.ProviderWeb {
-		fileDescription = "Grok Web JSON 或 SSO 文本"
+		fileDescription = "Grok Web JSON or SSO text"
 	} else if providerValue == accountdomain.ProviderConsole {
-		fileDescription = "Grok Console JSON 或 SSO 文本"
+		fileDescription = "Grok Console JSON or SSO text"
 	}
 	documents, ok := readAccountImportDocuments(c, fileDescription)
 	if !ok {
@@ -797,7 +797,7 @@ func (h *Handler) importFile(c *gin.Context, providerValue accountdomain.Provide
 	}
 	syncResult := pipeline.Finish(err != nil)
 	if err != nil {
-		stream.WriteError("authImportFailed", "导入账号失败")
+		stream.WriteError("authImportFailed", "Failed to import accounts")
 		return
 	}
 	_ = stream.Write("complete", accountImportResponse{Created: result.Created, Updated: result.Updated, Synced: syncResult.Succeeded, SyncFailed: syncResult.Failed})
@@ -808,43 +808,43 @@ func readAccountImportDocuments(c *gin.Context, fileDescription string) ([][]byt
 	if err != nil {
 		var sizeError *http.MaxBytesError
 		if errors.As(err, &sizeError) {
-			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "账号凭据文件总大小不能超过 30 MiB")
+			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "Account credential files must not exceed 30 MiB total")
 			return nil, false
 		}
-		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "请选择有效的"+fileDescription)
+		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "Please select a valid "+fileDescription)
 		return nil, false
 	}
 	defer form.RemoveAll()
 	files := append(form.File["files"], form.File["file"]...)
 	if len(files) == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "请选择有效的"+fileDescription)
+		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "Please select a valid "+fileDescription)
 		return nil, false
 	}
 	if len(files) > maxAccountImportFiles {
-		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "单次最多选择 1000 个账号文件")
+		response.Error(c, http.StatusBadRequest, "invalidAuthFile", "You can select at most 1000 account files at a time")
 		return nil, false
 	}
 	documents := make([][]byte, 0, len(files))
 	totalBytes := int64(0)
 	for _, file := range files {
 		if file.Size < 0 || totalBytes+file.Size > maxAccountImportBytes {
-			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "账号凭据文件总大小不能超过 30 MiB")
+			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "Account credential files must not exceed 30 MiB total")
 			return nil, false
 		}
 		opened, openErr := file.Open()
 		if openErr != nil {
-			response.Error(c, http.StatusBadRequest, "invalidAuthFile", "无法读取"+fileDescription)
+			response.Error(c, http.StatusBadRequest, "invalidAuthFile", "Failed to read "+fileDescription)
 			return nil, false
 		}
 		data, readErr := io.ReadAll(io.LimitReader(opened, maxAccountImportBytes-totalBytes+1))
 		_ = opened.Close()
 		if readErr != nil {
-			response.Error(c, http.StatusBadRequest, "invalidAuthFile", "无法读取"+fileDescription)
+			response.Error(c, http.StatusBadRequest, "invalidAuthFile", "Failed to read "+fileDescription)
 			return nil, false
 		}
 		totalBytes += int64(len(data))
 		if totalBytes > maxAccountImportBytes {
-			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "账号凭据文件总大小不能超过 30 MiB")
+			response.Error(c, http.StatusRequestEntityTooLarge, "accountImportFileTooLarge", "Account credential files must not exceed 30 MiB total")
 			return nil, false
 		}
 		documents = append(documents, data)
@@ -858,12 +858,12 @@ func (h *Handler) refreshWebQuota(c *gin.Context) {
 		return
 	}
 	if _, err := h.service.RefreshQuota(c.Request.Context(), id); err != nil {
-		h.writeServiceError(c, "quotaRefreshFailed", err, http.StatusBadGateway, "同步 Provider 额度失败")
+		h.writeServiceError(c, "quotaRefreshFailed", err, http.StatusBadGateway, "Failed to sync provider quota")
 		return
 	}
 	value, err := h.service.Get(c.Request.Context(), id)
 	if err != nil {
-		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "读取账号失败")
+		h.writeServiceError(c, "accountGetFailed", err, http.StatusInternalServerError, "Failed to load accounts")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))
@@ -872,7 +872,7 @@ func (h *Handler) refreshWebQuota(c *gin.Context) {
 func (h *Handler) exportCredentials(c *gin.Context) {
 	result, err := h.service.ExportCredentials(c.Request.Context())
 	if err != nil {
-		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "导出账号失败")
+		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "Failed to export accounts")
 		return
 	}
 	filename := "grok2api-accounts-" + time.Now().UTC().Format("20060102T150405Z") + ".json"
@@ -887,7 +887,7 @@ func (h *Handler) exportCredentials(c *gin.Context) {
 func (h *Handler) exportCLIProxyCredentials(c *gin.Context) {
 	result, err := h.service.ExportCLIProxyCredentials(c.Request.Context())
 	if err != nil {
-		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "导出账号失败")
+		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "Failed to export accounts")
 		return
 	}
 	c.Header("Cache-Control", "no-store")
@@ -912,7 +912,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var request updateRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	value, err := h.service.Update(c.Request.Context(), id, accountapp.UpdateInput{
@@ -921,7 +921,7 @@ func (h *Handler) update(c *gin.Context) {
 		CloudflareCookies: request.CloudflareCookies, ClearCloudflareCookies: request.ClearCloudflareCookies,
 	})
 	if err != nil {
-		h.writeServiceError(c, "accountUpdateFailed", err, http.StatusInternalServerError, "更新账号失败")
+		h.writeServiceError(c, "accountUpdateFailed", err, http.StatusInternalServerError, "Failed to update account")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))
@@ -933,7 +933,7 @@ func (h *Handler) delete(c *gin.Context) {
 		return
 	}
 	if err := h.service.Delete(c.Request.Context(), id); err != nil {
-		h.writeServiceError(c, "accountDeleteFailed", err, http.StatusInternalServerError, "删除账号失败")
+		h.writeServiceError(c, "accountDeleteFailed", err, http.StatusInternalServerError, "Failed to delete account")
 		return
 	}
 	response.Success(c, http.StatusOK, gin.H{"deleted": true})
@@ -968,7 +968,7 @@ func (h *Handler) refreshToken(c *gin.Context) {
 	}
 	value, err := h.service.RefreshToken(c.Request.Context(), id)
 	if err != nil {
-		h.writeServiceError(c, "tokenRefreshFailed", err, http.StatusBadGateway, "刷新账号凭据失败")
+		h.writeServiceError(c, "tokenRefreshFailed", err, http.StatusBadGateway, "Failed to refresh account credentials")
 		return
 	}
 	response.Success(c, http.StatusOK, newAccountResponse(value))
@@ -981,7 +981,7 @@ func (h *Handler) refreshBilling(c *gin.Context) {
 	}
 	value, err := h.service.RefreshBilling(c.Request.Context(), id)
 	if err != nil {
-		h.writeServiceError(c, "billingRefreshFailed", err, http.StatusBadGateway, "刷新账号额度失败")
+		h.writeServiceError(c, "billingRefreshFailed", err, http.StatusBadGateway, "Failed to refresh account billing")
 		return
 	}
 	response.Success(c, http.StatusOK, newBillingResponse(value))
@@ -992,7 +992,7 @@ func (h *Handler) refreshAllBilling(c *gin.Context) {
 	defer stream.Close()
 	succeeded, failed, err := h.service.SyncAllBillingWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
-		stream.WriteError("billingRefreshFailed", "刷新账号额度失败")
+		stream.WriteError("billingRefreshFailed", "Failed to refresh account billing")
 		return
 	}
 	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
@@ -1003,7 +1003,7 @@ func (h *Handler) refreshAllTokens(c *gin.Context) {
 	defer stream.Close()
 	succeeded, failed, skipped, err := h.service.RefreshAllTokensWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
-		stream.WriteError("tokenRefreshFailed", "续期账号凭据失败")
+		stream.WriteError("tokenRefreshFailed", "Failed to renew account credentials")
 		return
 	}
 	_ = stream.Write("complete", accountTokenRefreshResponse{Succeeded: succeeded, Failed: failed, Skipped: skipped})
@@ -1014,7 +1014,7 @@ func (h *Handler) refreshAllWebQuotas(c *gin.Context) {
 	defer stream.Close()
 	succeeded, failed, err := h.service.SyncAllWebQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
-		stream.WriteError("quotaRefreshFailed", "同步 Grok Web 账号额度失败")
+		stream.WriteError("quotaRefreshFailed", "Failed to sync Grok Web account quotas")
 		return
 	}
 	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
@@ -1025,7 +1025,7 @@ func (h *Handler) refreshAllConsoleQuotas(c *gin.Context) {
 	defer stream.Close()
 	succeeded, failed, err := h.service.SyncAllConsoleQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
 	if err != nil {
-		stream.WriteError("quotaRefreshFailed", "同步 Grok Console 账号额度失败")
+		stream.WriteError("quotaRefreshFailed", "Failed to sync Grok Console account quotas")
 		return
 	}
 	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
@@ -1103,7 +1103,7 @@ func pagination(c *gin.Context) (int, int) {
 func pathID(c *gin.Context) (uint64, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid ID")
 		return 0, false
 	}
 	return id, true
@@ -1114,7 +1114,7 @@ func parseIDs(values []string) ([]uint64, error) {
 	for _, value := range values {
 		id, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || id == 0 {
-			return nil, errors.New("ID 无效")
+			return nil, errors.New("Invalid ID")
 		}
 		ids = append(ids, id)
 	}
@@ -1123,13 +1123,13 @@ func parseIDs(values []string) ([]uint64, error) {
 
 func (h *Handler) validateProviderIDs(c *gin.Context, ids []uint64, providerValue string) bool {
 	if providerValue != string(accountdomain.ProviderBuild) && providerValue != string(accountdomain.ProviderWeb) && providerValue != string(accountdomain.ProviderConsole) {
-		response.Error(c, http.StatusBadRequest, "invalidProvider", "账号来源无效")
+		response.Error(c, http.StatusBadRequest, "invalidProvider", "Invalid account provider")
 		return false
 	}
 	for _, id := range ids {
 		value, err := h.service.Get(c.Request.Context(), id)
 		if err != nil || string(value.Credential.Provider) != providerValue {
-			response.Error(c, http.StatusConflict, "accountPoolMismatch", "批量操作包含不属于当前号池的账号")
+			response.Error(c, http.StatusConflict, "accountPoolMismatch", "Batch operation includes accounts outside the current account pool")
 			return false
 		}
 	}

@@ -41,7 +41,7 @@ const (
 	responseWriteTimeout           = 30 * time.Second
 )
 
-var errResponseTransferLimit = errors.New("响应超过代理安全上限")
+var errResponseTransferLimit = errors.New("Response exceeds the proxy safety limit")
 
 const mediaTransferErrorTrailer = "X-Grok2API-Transfer-Error"
 
@@ -157,7 +157,7 @@ type modelListItem struct {
 func (h *Handler) listModels(c *gin.Context) {
 	values, err := h.models.ListEnabled(c.Request.Context())
 	if err != nil {
-		writeOpenAIError(c, http.StatusInternalServerError, "model_list_failed", "读取模型列表失败")
+		writeOpenAIError(c, http.StatusInternalServerError, "model_list_failed", "Failed to list models")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": newModelListItems(values)})
@@ -194,18 +194,18 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
+		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds the configured limit")
 		return
 	}
 	var request chatCompletionRequest
 	if json.Unmarshal(body, &request) != nil || strings.TrimSpace(request.Model) == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Chat Completions 请求缺少有效 model")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Chat Completions request is missing a valid model")
 		return
 	}
 	clientValue, exists := c.Get(middleware.ClientKey)
 	clientKey, ok := clientValue.(clientkeydomain.Key)
 	if !exists || !ok {
-		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "客户端 API Key 无效")
+		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "Invalid client API key")
 		return
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
@@ -265,22 +265,22 @@ func (h *Handler) createMessage(c *gin.Context) {
 func (h *Handler) generateImage(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
-		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片生成仅支持 application/json")
+		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "Image generation only supports application/json")
 		return
 	}
 	var request imageGenerationRequest
 	if decodeSingleJSON(c.Request.Body, &request, false) != nil || strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.Prompt) == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片请求缺少有效 model 或 prompt")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Image request is missing a valid model or prompt")
 		return
 	}
 	if value := bytes.TrimSpace(request.StorageOptions); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前 Grok Web Provider 不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current Grok Web provider does not support storage_options")
 		return
 	}
 	count := 1
 	if request.Count != nil {
 		if *request.Count < 1 || *request.Count > 10 {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "n 必须在 1 到 10 之间")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "n must be between 1 and 10")
 			return
 		}
 		count = *request.Count
@@ -292,12 +292,12 @@ func (h *Handler) generateImage(c *gin.Context) {
 	partialImages := 0
 	if request.PartialImages != nil {
 		if *request.PartialImages < 0 || *request.PartialImages > 3 {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 必须在 0 到 3 之间")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images must be between 0 and 3")
 			return
 		}
 		partialImages = *request.PartialImages
 		if partialImages > 0 && !request.Stream {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 仅可在 stream=true 时使用")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images can only be used when stream=true")
 			return
 		}
 	}
@@ -324,13 +324,13 @@ func (h *Handler) writeMediaResult(c *gin.Context, result *gateway.Result) {
 	defer func() { result.Finalize(gateway.Usage{}, "", errorCode) }()
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
-		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_unavailable", "上游服务暂不可用")
+		writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_unavailable", "Upstream service is temporarily unavailable")
 		return
 	}
 	contentLength, contentLengthErr := strconv.ParseInt(result.Header.Get("Content-Length"), 10, 64)
 	if contentLengthErr == nil && contentLength > maxMediaResponseTransferBytes {
 		errorCode = "response_too_large"
-		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "上游媒体超过 2 GiB 安全上限")
+		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "Upstream media exceeds the 2 GiB safety limit")
 		return
 	}
 	copyHeaders(c.Writer.Header(), result.Header)
@@ -407,16 +407,16 @@ func copyMedia(writer io.Writer, source io.Reader, limit int64) error {
 func (h *Handler) editImage(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
-		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "图片编辑仅支持 application/json")
+		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "Image editing only supports application/json")
 		return
 	}
 	var request imageEditJSONRequest
 	if err := decodeSingleJSON(c.Request.Body, &request, false); err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片编辑 JSON 请求无效")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Invalid image edit JSON request")
 		return
 	}
 	if value := bytes.TrimSpace(request.StorageOptions); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前 Grok Web Provider 不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current Grok Web provider does not support storage_options")
 		return
 	}
 	model := strings.TrimSpace(request.Model)
@@ -430,13 +430,13 @@ func (h *Handler) editImage(c *gin.Context) {
 		inputs = append([]imageEditJSONImage{*request.Image}, inputs...)
 	}
 	if len(inputs) == 0 || len(inputs) > 8 {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "image 或 images 数量必须在 1 到 8 之间")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "image or images count must be between 1 and 8")
 		return
 	}
 	imageURLs := make([]string, 0, len(inputs))
 	for _, input := range inputs {
 		if strings.TrimSpace(input.FileID) != "" {
-			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前暂不支持 image.file_id，请使用 image.url")
+			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "image.file_id is not supported; use image.url")
 			return
 		}
 		if value := strings.TrimSpace(input.URL); value != "" {
@@ -444,37 +444,37 @@ func (h *Handler) editImage(c *gin.Context) {
 		}
 	}
 	if len(imageURLs) != len(inputs) {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "每个 image 都必须提供有效 url")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Each image must provide a valid url")
 		return
 	}
 	if model == "" || prompt == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "图片编辑缺少有效 model 或 prompt")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Image edit request is missing a valid model or prompt")
 		return
 	}
 	if count != 1 {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web 图片编辑当前仅支持 n=1")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web image editing currently only supports n=1")
 		return
 	}
 	partialImages := 0
 	if request.PartialImages != nil {
 		if *request.PartialImages < 0 || *request.PartialImages > 3 {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 必须在 0 到 3 之间")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images must be between 0 and 3")
 			return
 		}
 		partialImages = *request.PartialImages
 		if partialImages > 0 && !request.Stream {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images 仅可在 stream=true 时使用")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "partial_images can only be used when stream=true")
 			return
 		}
 	}
 	aspectRatio := strings.ToLower(strings.TrimSpace(request.AspectRatio))
 	size := strings.ToLower(strings.TrimSpace(request.Size))
 	if aspectRatio != "" && !validImageAspectRatio(aspectRatio) {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "aspect_ratio 不受支持")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "aspect_ratio is not supported")
 		return
 	}
 	if size != "" && !validImageEditSize(size) {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "size 必须是 auto、1024x1024、1024x1536 或 1536x1024")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "size must be auto, 1024x1024, 1024x1536, or 1536x1024")
 		return
 	}
 	resolution := strings.ToLower(strings.TrimSpace(request.Resolution))
@@ -482,7 +482,7 @@ func (h *Handler) editImage(c *gin.Context) {
 		resolution = "1k"
 	}
 	if resolution != "1k" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web 图片编辑当前仅支持 resolution=1k")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_parameter", "Grok Web image editing currently only supports resolution=1k")
 		return
 	}
 	clientKey, requestID, ok := requestIdentity(c)
@@ -506,7 +506,7 @@ func requestIdentity(c *gin.Context) (clientkeydomain.Key, string, bool) {
 	clientValue, exists := c.Get(middleware.ClientKey)
 	clientKey, ok := clientValue.(clientkeydomain.Key)
 	if !exists || !ok {
-		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "客户端 API Key 无效")
+		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "Invalid client API key")
 		return clientkeydomain.Key{}, "", false
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
@@ -517,20 +517,20 @@ func requestIdentity(c *gin.Context) (clientkeydomain.Key, string, bool) {
 func (h *Handler) generateVideo(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxBodyBytes)
 	if !isJSONRequest(c) {
-		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "视频生成仅支持 application/json")
+		writeOpenAIError(c, http.StatusUnsupportedMediaType, "invalid_request", "Video generation only supports application/json")
 		return
 	}
 	var request videoGenerationRequest
 	if err := decodeSingleJSON(c.Request.Body, &request, true); err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频生成 JSON 请求无效: "+err.Error())
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Invalid video generation JSON request: "+err.Error())
 		return
 	}
 	if hasJSONValue(request.Output) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前 Grok Web Provider 不支持 output.upload_url")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current Grok Web provider does not support output.upload_url")
 		return
 	}
 	if hasJSONValue(request.StorageOptions) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前 Grok Web Provider 不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current Grok Web provider does not support storage_options")
 		return
 	}
 	duration, err := parseVideoDuration(request.Duration)
@@ -541,7 +541,7 @@ func (h *Handler) generateVideo(c *gin.Context) {
 	model := strings.TrimSpace(request.Model)
 	prompt := strings.TrimSpace(request.Prompt)
 	if model == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频生成缺少有效 model")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Video generation request is missing a valid model")
 		return
 	}
 	aspectRatio := strings.TrimSpace(request.AspectRatio)
@@ -549,7 +549,7 @@ func (h *Handler) generateVideo(c *gin.Context) {
 		aspectRatio = "16:9"
 	}
 	if !validVideoAspectRatio(aspectRatio) {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "aspect_ratio 必须是 1:1、16:9、9:16、4:3、3:4、3:2 或 2:3")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "aspect_ratio must be 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, or 2:3")
 		return
 	}
 	resolution := strings.ToLower(strings.TrimSpace(request.Resolution))
@@ -557,7 +557,7 @@ func (h *Handler) generateVideo(c *gin.Context) {
 		resolution = "720p"
 	}
 	if resolution != "480p" && resolution != "720p" && resolution != "1080p" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "resolution 必须是 480p、720p 或 1080p")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "resolution must be 480p, 720p, or 1080p")
 		return
 	}
 	inputs := append([]videoGenerationImage(nil), request.ReferenceImages...)
@@ -565,24 +565,24 @@ func (h *Handler) generateVideo(c *gin.Context) {
 		inputs = append([]videoGenerationImage{*request.Image}, inputs...)
 	}
 	if len(inputs) > 8 {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "image 与 reference_images 合计不能超过 8 张")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "image and reference_images combined cannot exceed 8")
 		return
 	}
 	referenceURLs := make([]string, 0, len(inputs))
 	for _, input := range inputs {
 		if strings.TrimSpace(input.FileID) != "" {
-			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前暂不支持 image.file_id，请使用 image.url")
+			writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "image.file_id is not supported; use image.url")
 			return
 		}
 		urlValue := strings.TrimSpace(input.URL)
 		if urlValue == "" {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "每个 image 都必须提供有效 url")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Each image must provide a valid url")
 			return
 		}
 		referenceURLs = append(referenceURLs, urlValue)
 	}
 	if prompt == "" && len(referenceURLs) == 0 {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "文本生视频必须提供 prompt；图片生视频可以省略 prompt")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "text-to-video requires a prompt; image-to-video may omit the prompt")
 		return
 	}
 	clientKey, requestID, ok := requestIdentity(c)
@@ -642,7 +642,7 @@ func (h *Handler) getVideoContent(c *gin.Context) {
 
 func writeVideoContent(c *gin.Context, body io.Reader, contentType string, size int64) {
 	if size > maxMediaResponseTransferBytes {
-		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "上游媒体超过 2 GiB 安全上限")
+		writeOpenAIError(c, http.StatusBadGateway, "media_too_large", "Upstream media exceeds the 2 GiB safety limit")
 		return
 	}
 	c.Header("Content-Type", contentType)
@@ -667,14 +667,14 @@ func writeVideoContent(c *gin.Context, body io.Reader, contentType string, size 
 func parseVideoDuration(durationRaw json.RawMessage) (int, error) {
 	duration, hasDuration, err := parseOptionalVideoInteger(durationRaw)
 	if err != nil {
-		return 0, fmt.Errorf("duration 必须是整数或整数字符串")
+		return 0, fmt.Errorf("duration must be an integer or integer string")
 	}
 	value := 8
 	if hasDuration {
 		value = duration
 	}
 	if value < 1 || value > 15 {
-		return 0, fmt.Errorf("duration 必须在 1 到 15 秒之间")
+		return 0, fmt.Errorf("duration must be between 1 and 15 seconds")
 	}
 	return value, nil
 }
@@ -687,11 +687,11 @@ func parseOptionalVideoInteger(raw json.RawMessage) (int, bool, error) {
 	if json.Unmarshal(raw, &number) != nil {
 		var text string
 		if json.Unmarshal(raw, &text) != nil {
-			return 0, true, errors.New("必须是整数或整数字符串")
+			return 0, true, errors.New("must be an integer or integer string")
 		}
 		parsed, err := strconv.Atoi(strings.TrimSpace(text))
 		if err != nil {
-			return 0, true, errors.New("必须是整数或整数字符串")
+			return 0, true, errors.New("must be an integer or integer string")
 		}
 		number = parsed
 	}
@@ -770,18 +770,18 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "请求体超过限制")
+		writeOpenAIError(c, http.StatusRequestEntityTooLarge, "request_too_large", "Request body exceeds the configured limit")
 		return
 	}
 	var request responsesRequest
 	if err := json.Unmarshal(body, &request); err != nil || strings.TrimSpace(request.Model) == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Responses 请求缺少有效 model")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Responses request is missing a valid model")
 		return
 	}
 	if compact {
 		body, err = forceJSONBoolean(body, "stream", false)
 		if err != nil {
-			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Compact 请求格式无效")
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "Invalid Compact request format")
 			return
 		}
 		request.Stream = false
@@ -789,7 +789,7 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 	clientValue, exists := c.Get(middleware.ClientKey)
 	clientKey, ok := clientValue.(clientkeydomain.Key)
 	if !exists || !ok {
-		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "客户端 API Key 无效")
+		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "Invalid client API key")
 		return
 	}
 	requestID, _ := c.Get(middleware.RequestIDKey)
@@ -827,7 +827,7 @@ func decodeSingleJSON(reader io.Reader, target any, disallowUnknown bool) error 
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return errors.New("请求体只能包含一个 JSON 对象")
+			return errors.New("Request body must contain exactly one JSON object")
 		}
 		return err
 	}
@@ -846,12 +846,12 @@ func (h *Handler) handleOwnedResource(c *gin.Context, deleteResource bool) {
 	clientValue, exists := c.Get(middleware.ClientKey)
 	clientKey, ok := clientValue.(clientkeydomain.Key)
 	if !exists || !ok {
-		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "客户端 API Key 无效")
+		writeOpenAIError(c, http.StatusUnauthorized, "invalid_api_key", "Invalid client API key")
 		return
 	}
 	input := gateway.ResourceInput{ClientKey: clientKey, ResponseID: strings.TrimSpace(c.Param("responseId")), RawQuery: c.Request.URL.RawQuery}
 	if input.ResponseID == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "response_id 不能为空")
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "response_id cannot be empty")
 		return
 	}
 	var result *gateway.Result
@@ -885,9 +885,9 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	if isUpstreamCredentialStatus(result.StatusCode) {
 		errorCode = "upstream_unavailable"
 		if anthropic {
-			writeAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "上游服务暂不可用")
+			writeAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "Upstream service is temporarily unavailable")
 		} else {
-			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_unavailable", "上游服务暂不可用")
+			writeOpenAIError(c, http.StatusServiceUnavailable, "upstream_unavailable", "Upstream service is temporarily unavailable")
 		}
 		return
 	}
@@ -897,7 +897,7 @@ func (h *Handler) writeProtocolResult(c *gin.Context, result *gateway.Result, st
 	}
 	if contentLength, parseErr := strconv.ParseInt(result.Header.Get("Content-Length"), 10, 64); parseErr == nil && contentLength > transferLimit {
 		errorCode = "response_too_large"
-		writeOpenAIError(c, http.StatusBadGateway, "response_too_large", "上游响应超过代理安全上限")
+		writeOpenAIError(c, http.StatusBadGateway, "response_too_large", "Upstream response exceeds the proxy safety limit")
 		return
 	}
 	copyHeaders(c.Writer.Header(), result.Header)
@@ -936,7 +936,7 @@ func copyStream(writer gin.ResponseWriter, source io.Reader) (responseMetadata, 
 		n, readErr := source.Read(buffer)
 		if n > 0 {
 			if transferred+n > maxStreamResponseTransferBytes {
-				return inspector.Metadata(), fmt.Errorf("%w: 流式响应超过 %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
+				return inspector.Metadata(), fmt.Errorf("%w: streaming response exceeds %d MiB", errResponseTransferLimit, maxStreamResponseTransferBytes>>20)
 			}
 			chunk := buffer[:n]
 			inspector.Inspect(chunk)
@@ -968,7 +968,7 @@ func copyJSON(writer gin.ResponseWriter, source io.Reader) (responseMetadata, er
 		n, readErr := source.Read(buffer)
 		if n > 0 {
 			if transferred+n > maxJSONResponseTransferBytes {
-				return responseMetadata{}, fmt.Errorf("%w: 非流式响应超过 %d MiB", errResponseTransferLimit, maxJSONResponseTransferBytes>>20)
+				return responseMetadata{}, fmt.Errorf("%w: non-streaming response exceeds %d MiB", errResponseTransferLimit, maxJSONResponseTransferBytes>>20)
 			}
 			chunk := buffer[:n]
 			if err := setResponseWriteDeadline(writer); err != nil {
@@ -1204,7 +1204,7 @@ func writeImageGenerationUserError(c *gin.Context, code, param, message string) 
 
 func writeGatewayError(c *gin.Context, err error) {
 	status, code := http.StatusBadGateway, "upstream_unavailable"
-	message := "上游服务暂不可用"
+	message := "Upstream service is temporarily unavailable"
 	var upstreamFailure *gateway.UpstreamFailure
 	var selectionFailure *gateway.SelectionUnavailableError
 	switch {
@@ -1213,16 +1213,16 @@ func writeGatewayError(c *gin.Context, err error) {
 		message = clientkeyapp.ErrBillingLimit.Error()
 	case errors.Is(err, gateway.ErrModelNotFound):
 		status, code = http.StatusNotFound, "model_not_found"
-		message = "模型不存在"
+		message = "Model not found"
 	case errors.Is(err, gateway.ErrResponseNotFound):
 		status, code = http.StatusNotFound, "response_not_found"
-		message = "Response 不存在或已过期"
+		message = "Response not found or expired"
 	case errors.Is(err, gateway.ErrResponseStateUnsupported), errors.Is(err, gateway.ErrConversationUnsupported):
 		status, code = http.StatusBadRequest, "unsupported_parameter"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
 		if isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) {
-			status, code, message = http.StatusServiceUnavailable, "upstream_unavailable", "上游服务暂不可用"
+			status, code, message = http.StatusServiceUnavailable, "upstream_unavailable", "Upstream service is temporarily unavailable"
 		} else {
 			status, code, message = upstreamFailure.HTTPStatus, upstreamFailure.Code, upstreamFailure.PublicMessage
 		}
@@ -1233,14 +1233,14 @@ func writeGatewayError(c *gin.Context, err error) {
 		status, code, message = selectionErrorResponse(c, selectionFailure)
 	case errors.Is(err, gateway.ErrResponseAccountUnavailable), errors.Is(err, gateway.ErrNoAvailableAccount):
 		status, code = http.StatusServiceUnavailable, "upstream_unavailable"
-		message = "当前没有可用的上游账号"
+		message = "No available upstream account"
 	}
 	writeOpenAIError(c, status, code, message)
 }
 
 func writeGatewayAnthropicError(c *gin.Context, err error) {
 	status, errorType := http.StatusBadGateway, "api_error"
-	message := "上游服务暂不可用"
+	message := "Upstream service is temporarily unavailable"
 	var upstreamFailure *gateway.UpstreamFailure
 	var selectionFailure *gateway.SelectionUnavailableError
 	switch {
@@ -1249,13 +1249,13 @@ func writeGatewayAnthropicError(c *gin.Context, err error) {
 		message = clientkeyapp.ErrBillingLimit.Error()
 	case errors.Is(err, gateway.ErrModelNotFound):
 		status, errorType = http.StatusNotFound, "not_found_error"
-		message = "模型不存在"
+		message = "Model not found"
 	case errors.Is(err, gateway.ErrResponseStateUnsupported), errors.Is(err, gateway.ErrConversationUnsupported):
 		status, errorType = http.StatusBadRequest, "invalid_request_error"
 		message = err.Error()
 	case errors.As(err, &upstreamFailure):
 		if isUpstreamCredentialStatus(upstreamFailure.HTTPStatus) {
-			status, errorType, message = http.StatusServiceUnavailable, "overloaded_error", "上游服务暂不可用"
+			status, errorType, message = http.StatusServiceUnavailable, "overloaded_error", "Upstream service is temporarily unavailable"
 		} else {
 			status, message = upstreamFailure.HTTPStatus, upstreamFailure.PublicMessage
 		}
@@ -1274,7 +1274,7 @@ func writeGatewayAnthropicError(c *gin.Context, err error) {
 		}
 	case errors.Is(err, gateway.ErrResponseAccountUnavailable), errors.Is(err, gateway.ErrNoAvailableAccount):
 		status, errorType = http.StatusServiceUnavailable, "overloaded_error"
-		message = "当前没有可用的上游账号"
+		message = "No available upstream account"
 	}
 	writeAnthropicError(c, status, errorType, message)
 }
@@ -1284,21 +1284,21 @@ func isUpstreamCredentialStatus(status int) bool {
 }
 
 func selectionErrorResponse(c *gin.Context, failure *gateway.SelectionUnavailableError) (int, string, string) {
-	status, code, message := http.StatusServiceUnavailable, "upstream_unavailable", "当前没有可用的上游账号"
+	status, code, message := http.StatusServiceUnavailable, "upstream_unavailable", "No available upstream account"
 	if failure == nil {
 		return status, code, message
 	}
 	switch failure.Reason {
 	case gateway.SelectionCooling:
-		status, code, message = http.StatusTooManyRequests, "upstream_cooling", "上游账号正在冷却"
+		status, code, message = http.StatusTooManyRequests, "upstream_cooling", "Upstream accounts are cooling down"
 	case gateway.SelectionModelCooling:
-		status, code, message = http.StatusTooManyRequests, "upstream_model_cooling", "上游账号的目标模型正在冷却"
+		status, code, message = http.StatusTooManyRequests, "upstream_model_cooling", "The target model on upstream accounts is cooling down"
 	case gateway.SelectionQuotaExhausted:
-		status, code, message = http.StatusTooManyRequests, "upstream_quota_exhausted", "上游账号额度等待恢复"
+		status, code, message = http.StatusTooManyRequests, "upstream_quota_exhausted", "Upstream accounts are waiting for quota recovery"
 	case gateway.SelectionSaturated:
-		code, message = "upstream_saturated", "上游账号当前均达到并发上限"
+		code, message = "upstream_saturated", "Upstream accounts are at concurrency capacity"
 	case gateway.SelectionUnsupportedModel:
-		code, message = "upstream_model_unavailable", "当前账号池不支持该模型"
+		code, message = "upstream_model_unavailable", "The account pool does not support this model"
 	}
 	if failure.RetryAfter > 0 {
 		seconds := max(int64(1), int64((failure.RetryAfter+time.Second-1)/time.Second))

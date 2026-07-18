@@ -116,7 +116,7 @@ func (h *Handler) list(c *gin.Context) {
 	}
 	values, total, err := h.service.List(c.Request.Context(), page, pageSize)
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "auditListFailed", "读取审计记录失败")
+		response.Error(c, http.StatusInternalServerError, "auditListFailed", "Failed to load audit records")
 		return
 	}
 	items := make([]auditResponse, 0, len(values))
@@ -138,11 +138,11 @@ func (h *Handler) listCursor(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, auditapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period must be one of 24h, 7d, 30d, 90d")
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "auditListFailed", "读取审计记录失败")
+		response.Error(c, http.StatusInternalServerError, "auditListFailed", "Failed to load audit records")
 		return
 	}
 	items := make([]auditResponse, 0, len(result.Items))
@@ -155,16 +155,16 @@ func (h *Handler) listCursor(c *gin.Context) {
 func (h *Handler) get(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "审计 ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid audit ID")
 		return
 	}
 	value, err := h.service.Get(c.Request.Context(), id)
 	if errors.Is(err, repository.ErrNotFound) {
-		response.Error(c, http.StatusNotFound, "auditNotFound", "审计记录不存在")
+		response.Error(c, http.StatusNotFound, "auditNotFound", "Audit record not found")
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "auditDetailFailed", "读取审计详情失败")
+		response.Error(c, http.StatusInternalServerError, "auditDetailFailed", "Failed to load audit detail")
 		return
 	}
 	attempts := make([]auditAttemptResponse, 0, len(value.Attempts))
@@ -239,11 +239,11 @@ func (h *Handler) summary(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, auditapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidAuditPeriod", "period must be one of 24h, 7d, 30d, 90d")
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "auditSummaryFailed", "读取审计统计失败")
+		response.Error(c, http.StatusInternalServerError, "auditSummaryFailed", "Failed to load audit summary")
 		return
 	}
 	response.Success(c, http.StatusOK, summaryResponse{

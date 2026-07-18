@@ -79,7 +79,7 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "clientKeyListFailed", "读取客户端 Key 失败")
+		response.Error(c, http.StatusInternalServerError, "clientKeyListFailed", "Failed to load client keys")
 		return
 	}
 	items := make([]keyResponse, 0, len(values))
@@ -92,7 +92,7 @@ func (h *Handler) list(c *gin.Context) {
 func (h *Handler) batchUpdate(c *gin.Context) {
 	var request batchUpdateRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -111,7 +111,7 @@ func (h *Handler) batchUpdate(c *gin.Context) {
 func (h *Handler) batchDelete(c *gin.Context) {
 	var request batchDeleteRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	ids, err := parseIDs(request.IDs)
@@ -130,17 +130,17 @@ func (h *Handler) batchDelete(c *gin.Context) {
 func (h *Handler) create(c *gin.Context) {
 	var request createRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	expiresAt, err := parseTime(request.ExpiresAt)
 	if err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidExpiresAt", "expiresAt 必须是 RFC3339 时间")
+		response.Error(c, http.StatusBadRequest, "invalidExpiresAt", "expiresAt must be an RFC3339 timestamp")
 		return
 	}
 	modelIDs, err := parseIDs(request.AllowedModelIDs)
 	if err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds 包含无效 ID")
+		response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds contains an invalid ID")
 		return
 	}
 	enabled := true
@@ -162,7 +162,7 @@ func (h *Handler) update(c *gin.Context) {
 	}
 	var request updateRequest
 	if c.ShouldBindJSON(&request) != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效")
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters")
 		return
 	}
 	input := clientkeyapp.UpdateInput{Name: request.Name, Enabled: request.Enabled, RPMLimit: request.RPMLimit, MaxConcurrent: request.MaxConcurrent, BillingLimitUSDTicks: request.BillingLimitUSDTicks}
@@ -172,7 +172,7 @@ func (h *Handler) update(c *gin.Context) {
 		} else {
 			expiresAt, err := parseTime(*request.ExpiresAt)
 			if err != nil {
-				response.Error(c, http.StatusBadRequest, "invalidExpiresAt", "expiresAt 必须是 RFC3339 时间")
+				response.Error(c, http.StatusBadRequest, "invalidExpiresAt", "expiresAt must be an RFC3339 timestamp")
 				return
 			}
 			input.ExpiresAt = expiresAt
@@ -181,7 +181,7 @@ func (h *Handler) update(c *gin.Context) {
 	if request.AllowedModelIDs != nil {
 		ids, err := parseIDs(*request.AllowedModelIDs)
 		if err != nil {
-			response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds 包含无效 ID")
+			response.Error(c, http.StatusBadRequest, "invalidModelId", "allowedModelIds contains an invalid ID")
 			return
 		}
 		input.AllowedModels = &ids
@@ -233,7 +233,7 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error) {
 	case errors.Is(err, clientkeyapp.ErrSecretUnavailable):
 		response.Error(c, http.StatusConflict, "clientKeySecretUnavailable", err.Error())
 	default:
-		response.Error(c, http.StatusInternalServerError, code, "客户端 Key 操作失败")
+		response.Error(c, http.StatusInternalServerError, code, "Client key operation failed")
 	}
 }
 
@@ -262,7 +262,7 @@ func parseIDs(values []string) ([]uint64, error) {
 	for _, value := range values {
 		id, err := strconv.ParseUint(value, 10, 64)
 		if err != nil || id == 0 {
-			return nil, fmt.Errorf("无效模型 ID: %s", value)
+			return nil, fmt.Errorf("invalid model ID: %s", value)
 		}
 		result = append(result, id)
 	}
@@ -272,7 +272,7 @@ func parseIDs(values []string) ([]uint64, error) {
 func pathID(c *gin.Context) (uint64, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
-		response.Error(c, http.StatusBadRequest, "invalidId", "ID 无效")
+		response.Error(c, http.StatusBadRequest, "invalidId", "Invalid ID")
 		return 0, false
 	}
 	return id, true

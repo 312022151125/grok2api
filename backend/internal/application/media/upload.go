@@ -29,16 +29,16 @@ const (
 )
 
 var (
-	ErrInvalidVideoUpload = errors.New("视频上传无效")
+	ErrInvalidVideoUpload = errors.New("Invalid video upload")
 	// ErrVideoUploadTooLarge 表示 body 超过票据/中间件体积上限；handler 映射为 HTTP 413。
 	// 同时包装 ErrInvalidVideoUpload，便于统一归类为无效上传。
-	ErrVideoUploadTooLarge      = errors.New("视频超过体积上限")
-	ErrUploadTicketNotFound     = errors.New("上传票据不存在")
-	ErrUploadTicketExpired      = errors.New("上传票据已过期")
-	ErrUploadTicketConsumed     = errors.New("上传票据已使用")
-	ErrUploadPublicBase         = errors.New("公开 API 地址不可用于 XAI 视频上传")
-	ErrVideoUploadIncomplete    = errors.New("视频尚未上传完成")
-	ErrUploadTicketsUnavailable = errors.New("视频上传票据仓储未配置")
+	ErrVideoUploadTooLarge      = errors.New("Video exceeds size limit")
+	ErrUploadTicketNotFound     = errors.New("Upload ticket not found")
+	ErrUploadTicketExpired      = errors.New("Upload ticket expired")
+	ErrUploadTicketConsumed     = errors.New("Upload ticket already used")
+	ErrUploadPublicBase         = errors.New("Public API base URL cannot be used for XAI video upload")
+	ErrVideoUploadIncomplete    = errors.New("Video upload is not complete yet")
+	ErrUploadTicketsUnavailable = errors.New("Video upload ticket repository is not configured")
 )
 
 func errVideoTooLarge() error {
@@ -66,7 +66,7 @@ func (s *Service) IssueVideoUpload(ctx context.Context, jobID string) (uploadURL
 	}
 	jobID = strings.TrimSpace(jobID)
 	if jobID == "" {
-		return "", "", fmt.Errorf("%w: 缺少视频任务 ID", ErrInvalidVideoUpload)
+		return "", "", fmt.Errorf("%w: missing video job ID", ErrInvalidVideoUpload)
 	}
 	token, err := newUploadToken()
 	if err != nil {
@@ -95,9 +95,9 @@ func (s *Service) IssueVideoUpload(ctx context.Context, jobID string) (uploadURL
 	if err := s.tickets.BindJobResultAsset(ctx, jobID, assetID); err != nil && !errors.Is(err, repository.ErrNotFound) {
 		// 补偿删除刚创建的票据，避免 bind 失败后留下不可达行直至 TTL。
 		if delErr := s.tickets.DeleteUploadTicketByHash(ctx, ticket.TokenHash); delErr != nil {
-			return "", "", fmt.Errorf("绑定视频任务结果资产失败: %w", errors.Join(err, fmt.Errorf("回滚上传票据失败: %w", delErr)))
+			return "", "", fmt.Errorf("failed to bind video job result asset: %w", errors.Join(err, fmt.Errorf("failed to roll back upload ticket: %w", delErr)))
 		}
-		return "", "", fmt.Errorf("绑定视频任务结果资产失败: %w", err)
+		return "", "", fmt.Errorf("failed to bind video job result asset: %w", err)
 	}
 	uploadURL = publicBase + "/v1/media/uploads/" + token
 	return uploadURL, assetID, nil
@@ -107,7 +107,7 @@ func (s *Service) IssueVideoUpload(ctx context.Context, jobID string) (uploadURL
 func (s *Service) WaitVideoUpload(ctx context.Context, assetID string) (contentType string, err error) {
 	assetID = strings.TrimSpace(assetID)
 	if assetID == "" {
-		return "", fmt.Errorf("%w: 缺少资产 ID", ErrInvalidVideoUpload)
+		return "", fmt.Errorf("%w: missing asset ID", ErrInvalidVideoUpload)
 	}
 	ticker := time.NewTicker(videoUploadWaitInterval)
 	defer ticker.Stop()
@@ -169,11 +169,11 @@ func (s *Service) ReceiveVideoUpload(ctx context.Context, rawToken string, conte
 		allowedMIME = "video/mp4"
 	}
 	if !supportedVideoMIME(allowedMIME) {
-		return mediadomain.Asset{}, fmt.Errorf("%w: 票据 MIME 无效", ErrInvalidVideoUpload)
+		return mediadomain.Asset{}, fmt.Errorf("%w: invalid ticket MIME type", ErrInvalidVideoUpload)
 	}
 	declaredMIME := normalizeVideoMIME(contentType)
 	if declaredMIME != "" && declaredMIME != allowedMIME {
-		return mediadomain.Asset{}, fmt.Errorf("%w: Content-Type 与票据不允许的类型不一致", ErrInvalidVideoUpload)
+		return mediadomain.Asset{}, fmt.Errorf("%w: Content-Type does not match the ticket allowlist", ErrInvalidVideoUpload)
 	}
 
 	staged, err := s.stageVideo(ctx, existing.AssetID, allowedMIME, body, existing.MaxBytes)
@@ -214,7 +214,7 @@ func (s *Service) SaveVideo(ctx context.Context, jobID, contentType string, body
 		mimeType = "video/mp4"
 	}
 	if !supportedVideoMIME(mimeType) {
-		return mediadomain.Asset{}, fmt.Errorf("%w: Content-Type 无效", ErrInvalidVideoUpload)
+		return mediadomain.Asset{}, fmt.Errorf("%w: invalid Content-Type", ErrInvalidVideoUpload)
 	}
 	id, err := newVideoAssetID()
 	if err != nil {
@@ -225,7 +225,7 @@ func (s *Service) SaveVideo(ctx context.Context, jobID, contentType string, body
 	if s.tickets != nil && jobID != "" {
 		bindErr := s.tickets.BindJobResultAsset(ctx, jobID, id)
 		if bindErr != nil && !errors.Is(bindErr, repository.ErrNotFound) {
-			return mediadomain.Asset{}, fmt.Errorf("绑定视频任务结果资产失败: %w", bindErr)
+			return mediadomain.Asset{}, fmt.Errorf("failed to bind video job result asset: %w", bindErr)
 		}
 		bound = bindErr == nil
 	}
@@ -278,7 +278,7 @@ func (s *Service) stageVideo(ctx context.Context, id, mimeType string, body io.R
 		return stagedVideo{}, closeErr
 	}
 	if written == 0 {
-		return stagedVideo{}, fmt.Errorf("%w: 空内容", ErrInvalidVideoUpload)
+		return stagedVideo{}, fmt.Errorf("%w: empty content", ErrInvalidVideoUpload)
 	}
 	if written > maxBytes {
 		return stagedVideo{}, errVideoTooLarge()
@@ -288,7 +288,7 @@ func (s *Service) stageVideo(ctx context.Context, id, mimeType string, body io.R
 		return stagedVideo{}, err
 	}
 	if sniffed != mimeType {
-		return stagedVideo{}, fmt.Errorf("%w: 内容类型与声明类型不一致", ErrInvalidVideoUpload)
+		return stagedVideo{}, fmt.Errorf("%w: content type does not match declared type", ErrInvalidVideoUpload)
 	}
 	cleanup = false
 	return stagedVideo{ID: id, TempPath: tempPath, StorageKey: storageKey, MIMEType: mimeType, SizeBytes: written, SHA256: hex.EncodeToString(hasher.Sum(nil))}, nil
@@ -353,7 +353,7 @@ func newUploadToken() (string, error) {
 	// 256 bit 熵，hex 编码；校验时再 SHA-256 存库。
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("生成上传票据: %w", err)
+		return "", fmt.Errorf("generate upload ticket: %w", err)
 	}
 	return hex.EncodeToString(raw), nil
 }
@@ -378,7 +378,7 @@ func validUploadToken(token string) bool {
 func newVideoAssetID() (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("生成视频资源 ID: %w", err)
+		return "", fmt.Errorf("generate video asset ID: %w", err)
 	}
 	return "vid_" + base64.RawURLEncoding.EncodeToString(raw), nil
 }
@@ -412,7 +412,7 @@ func sniffVideoFile(path string) (string, error) {
 		return "", err
 	}
 	if n == 0 {
-		return "", fmt.Errorf("%w: 空内容", ErrInvalidVideoUpload)
+		return "", fmt.Errorf("%w: empty content", ErrInvalidVideoUpload)
 	}
 	detected := http.DetectContentType(header[:n])
 	// DetectContentType 对 mp4 通常返回 video/mp4；部分样本可能是 application/octet-stream。
@@ -425,7 +425,7 @@ func sniffVideoFile(path string) (string, error) {
 	if looksLikeWebM(header[:n]) {
 		return "video/webm", nil
 	}
-	return "", fmt.Errorf("%w: 非视频内容", ErrInvalidVideoUpload)
+	return "", fmt.Errorf("%w: not video content", ErrInvalidVideoUpload)
 }
 
 func looksLikeMP4(header []byte) bool {

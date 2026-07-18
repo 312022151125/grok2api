@@ -11,8 +11,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
-var ErrInvalidPeriod = errors.New("Dashboard 时间范围无效")
-var ErrInvalidTimezone = errors.New("Dashboard 时区无效")
+var ErrInvalidPeriod = errors.New("Invalid dashboard period")
+var ErrInvalidTimezone = errors.New("Invalid dashboard timezone")
 
 const dashboardCacheTTL = 15 * time.Second
 

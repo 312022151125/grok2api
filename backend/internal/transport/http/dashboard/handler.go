@@ -101,15 +101,15 @@ func (h *Handler) get(c *gin.Context) {
 	}
 	result, err := load(c.Request.Context(), c.Query("period"), c.Query("timezone"))
 	if errors.Is(err, dashboardapp.ErrInvalidPeriod) {
-		response.Error(c, http.StatusBadRequest, "invalidDashboardPeriod", "period 仅支持 24h、7d、30d、90d")
+		response.Error(c, http.StatusBadRequest, "invalidDashboardPeriod", "period must be one of 24h, 7d, 30d, 90d")
 		return
 	}
 	if errors.Is(err, dashboardapp.ErrInvalidTimezone) {
-		response.Error(c, http.StatusBadRequest, "invalidDashboardTimezone", "timezone 必须是有效的 IANA 时区")
+		response.Error(c, http.StatusBadRequest, "invalidDashboardTimezone", "timezone must be a valid IANA timezone")
 		return
 	}
 	if err != nil {
-		response.Error(c, http.StatusInternalServerError, "dashboardLoadFailed", "读取 Dashboard 失败")
+		response.Error(c, http.StatusInternalServerError, "dashboardLoadFailed", "Failed to load dashboard")
 		return
 	}
 	series := make([]seriesDTO, 0, len(result.Series))

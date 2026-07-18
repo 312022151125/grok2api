@@ -872,6 +872,36 @@ const resources = {
         sessionRefreshUnavailable: "暂时无法刷新登录状态，请稍后重试",
         streamTimeout: "任务进度连接长时间无响应，请重试",
         tokenRefreshFailed: "刷新账号凭据失败",
+        loginRateLimited: "登录尝试过于频繁，请稍后重试",
+        authRuntimeUnavailable: "管理员认证服务暂不可用",
+        settingsConflict: "设置已在其他会话中更新，请刷新后重试",
+        invalidProvider: "账号来源无效",
+        accountPoolMismatch: "账号池与当前模型不匹配",
+        accountSummaryFailed: "读取账号统计失败",
+        accountGetFailed: "读取账号失败",
+        accountConversionBusy: "账号正在转换为 Grok Build",
+        accountOperationUnsupported: "当前账号来源不支持该操作",
+        invalidAuditPeriod: "审计周期无效",
+        auditNotFound: "审计记录不存在",
+        auditDetailFailed: "读取审计详情失败",
+        auditSummaryFailed: "读取审计汇总失败",
+        invalidDashboardTimezone: "时区必须是有效的 IANA 时区",
+        invalidEgressScope: "出口作用域无效",
+        invalidEgressNode: "出口节点无效",
+        egressNodeNotFound: "出口节点不存在",
+        egressNodeListFailed: "读取出口节点失败",
+        egressNodeOperationFailed: "出口节点操作失败",
+        mediaListImagesFailed: "读取图片列表失败",
+        mediaImageStatsFailed: "读取图片统计失败",
+        mediaDeleteImagesFailed: "删除图片失败",
+        mediaListVideosFailed: "读取视频列表失败",
+        mediaVideoStatsFailed: "读取视频统计失败",
+        mediaDeleteVideosFailed: "删除视频失败",
+        invalidImageSelection: "图片选择无效",
+        invalidVideoSelection: "视频选择无效",
+        modelNotFound: "模型不存在",
+        modelConflict: "模型冲突",
+        clientKeyConflict: "客户端密钥冲突",
       },
     },
   },
@@ -1284,6 +1314,36 @@ const resources = {
         sessionRefreshUnavailable: "Unable to refresh the session right now. Please retry shortly.",
         streamTimeout: "The task progress stream stopped responding. Please retry.",
         tokenRefreshFailed: "Failed to refresh the account credential",
+        loginRateLimited: "Too many login attempts. Please try again later.",
+        authRuntimeUnavailable: "Admin authentication service is temporarily unavailable",
+        settingsConflict: "Settings were updated in another session. Refresh and try again.",
+        invalidProvider: "Invalid account provider",
+        accountPoolMismatch: "Account pool does not match the current model",
+        accountSummaryFailed: "Failed to load account summary",
+        accountGetFailed: "Failed to load accounts",
+        accountConversionBusy: "Account is already converting to Grok Build",
+        accountOperationUnsupported: "This operation is not supported for the account source",
+        invalidAuditPeriod: "The audit period is invalid",
+        auditNotFound: "Audit record not found",
+        auditDetailFailed: "Failed to load audit details",
+        auditSummaryFailed: "Failed to load audit summary",
+        invalidDashboardTimezone: "timezone must be a valid IANA timezone",
+        invalidEgressScope: "Invalid egress scope",
+        invalidEgressNode: "Invalid egress node",
+        egressNodeNotFound: "Egress node not found",
+        egressNodeListFailed: "Failed to load egress nodes",
+        egressNodeOperationFailed: "Egress node operation failed",
+        mediaListImagesFailed: "Failed to list images",
+        mediaImageStatsFailed: "Failed to load image stats",
+        mediaDeleteImagesFailed: "Failed to delete images",
+        mediaListVideosFailed: "Failed to list videos",
+        mediaVideoStatsFailed: "Failed to load video stats",
+        mediaDeleteVideosFailed: "Failed to delete videos",
+        invalidImageSelection: "Invalid image selection",
+        invalidVideoSelection: "Invalid video selection",
+        modelNotFound: "Model not found",
+        modelConflict: "Model conflict",
+        clientKeyConflict: "Client key conflict",
       },
     },
   },
@@ -1307,12 +1367,34 @@ function storeLanguage(language: string): void {
   }
 }
 
-const storedLanguage = readStoredLanguage();
+function normalizeStoredLanguage(value: string | null): "en" | "zh-CN" | null {
+  if (value === "en" || value === "zh-CN") return value;
+  return null;
+}
+
+function detectBrowserLanguage(): "en" | "zh-CN" {
+  if (typeof navigator === "undefined") return "en";
+  const candidates = [
+    ...(navigator.languages ?? []),
+    navigator.language,
+  ].filter(Boolean);
+  for (const raw of candidates) {
+    const tag = raw.toLowerCase();
+    if (tag === "zh-cn" || tag.startsWith("zh")) return "zh-CN";
+  }
+  return "en";
+}
+
+const storedLanguage = normalizeStoredLanguage(readStoredLanguage());
+const initialLanguage = storedLanguage ?? detectBrowserLanguage();
 
 void i18n.use(initReactI18next).init({
   resources,
-  lng: storedLanguage === "en" ? "en" : "zh-CN",
-  fallbackLng: "zh-CN",
+  lng: initialLanguage,
+  fallbackLng: "en",
+  supportedLngs: ["en", "zh-CN"],
+  nonExplicitSupportedLngs: false,
+  load: "currentOnly",
   interpolation: { escapeValue: false },
 });
 

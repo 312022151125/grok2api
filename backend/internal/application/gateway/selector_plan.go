@@ -101,7 +101,7 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 		var err error
 		concurrencySnapshot, err = batchReader.CurrentMany(ctx, keys)
 		if err != nil {
-			return nil, fmt.Errorf("批量读取账号并发租约: %w", err)
+			return nil, fmt.Errorf("batch-read account concurrency leases: %w", err)
 		}
 	}
 	inFlight := make([]int, len(values))
@@ -112,7 +112,7 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 		}
 		current, err := s.concurrency.Current(ctx, keys[index])
 		if err != nil {
-			return nil, fmt.Errorf("读取账号并发租约: %w", err)
+			return nil, fmt.Errorf("read account concurrency lease: %w", err)
 		}
 		inFlight[index] = current
 	}

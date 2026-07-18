@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("代理节点参数无效")
-	ErrInvalidSort  = errors.New("代理节点排序条件无效")
-	ErrNotFound     = errors.New("代理节点不存在")
+	ErrInvalidInput = errors.New("Invalid egress node parameters")
+	ErrInvalidSort  = errors.New("Invalid egress node sort")
+	ErrNotFound     = errors.New("Egress node not found")
 )
 
 const (
@@ -104,10 +104,10 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 func (s *Service) applyInput(value domain.Node, input Input, create bool) (domain.Node, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" || len(name) > 160 {
-		return domain.Node{}, fmt.Errorf("%w: 名称必须在 1 到 160 个字符之间", ErrInvalidInput)
+		return domain.Node{}, fmt.Errorf("%w: name must be between 1 and 160 characters", ErrInvalidInput)
 	}
 	if input.Scope != domain.ScopeBuild && input.Scope != domain.ScopeWeb && input.Scope != domain.ScopeConsole && input.Scope != domain.ScopeWebAsset {
-		return domain.Node{}, fmt.Errorf("%w: scope 必须是 grok_build、grok_web、grok_console 或 grok_web_asset", ErrInvalidInput)
+		return domain.Node{}, fmt.Errorf("%w: scope must be grok_build, grok_web, grok_console, or grok_web_asset", ErrInvalidInput)
 	}
 	value.Name, value.Scope, value.Enabled = name, input.Scope, input.Enabled
 	if input.Scope == domain.ScopeBuild {
@@ -120,7 +120,7 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		value.UserAgent = s.browserUA
 	}
 	if len(value.UserAgent) > 512 {
-		return domain.Node{}, fmt.Errorf("%w: User-Agent 过长", ErrInvalidInput)
+		return domain.Node{}, fmt.Errorf("%w: User-Agent is too long", ErrInvalidInput)
 	}
 	if input.ClearProxyURL {
 		value.EncryptedProxyURL = ""
@@ -142,7 +142,7 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		value.EncryptedCloudflareCookie = ""
 	} else if input.CloudflareCookies != nil {
 		if len(*input.CloudflareCookies) > maxCloudflareCookieBytes {
-			return domain.Node{}, fmt.Errorf("%w: Cloudflare Cookie 不能超过 16 KiB", ErrInvalidInput)
+			return domain.Node{}, fmt.Errorf("%w: Cloudflare cookies cannot exceed 16 KiB", ErrInvalidInput)
 		}
 		cookies := SanitizeCloudflareCookies(*input.CloudflareCookies)
 		if cookies != "" || create {
@@ -178,31 +178,31 @@ func NormalizeProxyURL(value string) (string, error) {
 		return "", nil
 	}
 	if len(value) > maxProxyURLBytes || strings.IndexFunc(value, func(character rune) bool { return character < 0x20 || character == 0x7f }) >= 0 {
-		return "", errors.New("代理地址过长或包含控制字符")
+		return "", errors.New("proxy URL is too long or contains control characters")
 	}
 	hasAccountPlaceholder := strings.Contains(value, ProxyAccountPlaceholder)
 	if strings.Count(value, ProxyAccountPlaceholder) > 1 {
-		return "", errors.New("代理地址最多包含一个 {account} 占位符")
+		return "", errors.New("proxy URL may contain at most one {account} placeholder")
 	}
 	if hasAccountPlaceholder && strings.Contains(value, proxyAccountSentinel) {
-		return "", errors.New("代理地址包含保留的账号占位符文本")
+		return "", errors.New("proxy URL contains reserved account placeholder text")
 	}
 	parseValue := strings.ReplaceAll(value, ProxyAccountPlaceholder, proxyAccountSentinel)
 	parsed, err := url.Parse(parseValue)
 	if err != nil || parsed.Host == "" || parsed.Hostname() == "" {
-		return "", errors.New("代理地址格式无效")
+		return "", errors.New("invalid proxy URL format")
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https", "socks4", "socks4a", "socks5", "socks5h":
 	default:
-		return "", errors.New("代理地址协议必须是 HTTP、HTTPS、SOCKS4 或 SOCKS5")
+		return "", errors.New("proxy URL scheme must be HTTP, HTTPS, SOCKS4, or SOCKS5")
 	}
 	if parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return "", errors.New("代理地址不能包含路径、查询参数或片段")
+		return "", errors.New("proxy URL cannot include a path, query, or fragment")
 	}
 	if hasAccountPlaceholder {
 		if parsed.User == nil || !strings.Contains(parsed.User.Username(), proxyAccountSentinel) {
-			return "", errors.New("{account} 只能用于代理认证用户名")
+			return "", errors.New("{account} may only be used in the proxy authentication username")
 		}
 		return strings.ReplaceAll(parsed.String(), proxyAccountSentinel, ProxyAccountPlaceholder), nil
 	}

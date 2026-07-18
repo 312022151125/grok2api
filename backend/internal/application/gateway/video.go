@@ -41,10 +41,10 @@ type VideoInput struct {
 
 func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job, error) {
 	if s.mediaJobs == nil || s.mediaQueue == nil {
-		return media.Job{}, fmt.Errorf("视频任务服务未配置")
+		return media.Job{}, fmt.Errorf("video job service is not configured")
 	}
 	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0) {
-		return media.Job{}, fmt.Errorf("文本生视频必须提供 prompt；图片生视频可以省略 prompt")
+		return media.Job{}, fmt.Errorf("text-to-video requires a prompt; image-to-video may omit the prompt")
 	}
 	routes, err := s.models.GetByPublicIDCandidates(ctx, input.PublicModel)
 	if err != nil {
@@ -154,7 +154,7 @@ func (s *Service) OpenVideoContent(ctx context.Context, id string, key clientkey
 		return nil, "", 0, err
 	}
 	if job.Status != media.StatusCompleted {
-		return nil, "", 0, fmt.Errorf("视频内容尚未可用")
+		return nil, "", 0, fmt.Errorf("video content is not ready")
 	}
 	// 本地资产优先：XAI ZDR 上传完成后不经公网回环下载。
 	if job.ResultAssetID != "" && s.mediaAssets != nil {
@@ -164,7 +164,7 @@ func (s *Service) OpenVideoContent(ctx context.Context, id string, key clientkey
 		}
 	}
 	if job.UpstreamURL == "" {
-		return nil, "", 0, fmt.Errorf("视频内容尚未可用")
+		return nil, "", 0, fmt.Errorf("video content is not ready")
 	}
 	adapter, ok := s.providers.Videos(account.Provider(job.Provider))
 	if !ok {
@@ -280,7 +280,7 @@ func (s *Service) processVideoJob(ctx context.Context, id string) {
 		route, err = s.models.GetByPublicID(ctx, job.Model)
 	}
 	if err != nil {
-		s.failVideoJob(ctx, job, "model_not_found", errors.New("模型路由不存在"))
+		s.failVideoJob(ctx, job, "model_not_found", errors.New("model route not found"))
 		return
 	}
 	s.runVideoJob(ctx, job, route)
@@ -408,7 +408,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
 		failureCode, publicErr := "generation_failed", err
 		if status, ok := provider.ErrorHTTPStatus(err); errors.Is(err, provider.ErrUnauthorized) || (ok && (status == http.StatusUnauthorized || status == http.StatusForbidden)) {
-			failureCode, publicErr = "provider_unavailable", errors.New("上游服务暂不可用")
+			failureCode, publicErr = "provider_unavailable", errors.New("Upstream service is temporarily unavailable")
 		}
 		s.failVideoJob(parent, job, failureCode, publicErr)
 		return
@@ -437,11 +437,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 // 且所有尝试固定使用创建任务的同一凭据。
 func (s *Service) persistRemoteVideo(ctx context.Context, jobID string, adapter provider.VideoAdapter, credential account.Credential, result provider.VideoResult) (provider.VideoResult, error) {
 	if s.mediaAssets == nil {
-		return result, provider.NewMediaPostProcessingError(provider.MediaPostProcessingStorage, errors.New("视频媒体存储未配置"))
+		return result, provider.NewMediaPostProcessingError(provider.MediaPostProcessingStorage, errors.New("video media storage is not configured"))
 	}
 	downloader, ok := adapter.(provider.VideoContentDownloader)
 	if !ok {
-		return result, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, errors.New("Provider 不支持视频内容下载"))
+		return result, provider.NewMediaPostProcessingError(provider.MediaPostProcessingDownload, errors.New("provider does not support video content download"))
 	}
 	var lastErr error
 	for attempt := 0; attempt < videoOutputAttempts; attempt++ {
@@ -492,7 +492,7 @@ func (s *Service) reconcileVideoUsage(ctx context.Context) error {
 			durationMS = max(int64(0), job.CompletedAt.Sub(job.CreatedAt).Milliseconds())
 		}
 		if err := s.recordVideoAudit(ctx, job, durationMS); err != nil {
-			result = firstError(result, fmt.Errorf("任务 %s: %w", job.ID, err))
+			result = firstError(result, fmt.Errorf("job %s: %w", job.ID, err))
 		}
 	}
 	return result

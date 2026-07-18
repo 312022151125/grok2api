@@ -132,7 +132,7 @@ func (h *Handler) get(c *gin.Context) {
 func (h *Handler) update(c *gin.Context) {
 	var request updateRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		response.Error(c, http.StatusBadRequest, "invalidRequest", "请求参数无效: "+err.Error())
+		response.Error(c, http.StatusBadRequest, "invalidRequest", "Invalid request parameters: "+err.Error())
 		return
 	}
 	result, err := h.service.Update(c.Request.Context(), request.Revision, request.Config.toApplication())
@@ -142,10 +142,10 @@ func (h *Handler) update(c *gin.Context) {
 			return
 		}
 		if errors.Is(err, settingsapp.ErrConflict) {
-			response.Error(c, http.StatusConflict, "settingsConflict", "设置已被其他会话更新，请刷新后重试")
+			response.Error(c, http.StatusConflict, "settingsConflict", "Settings were updated in another session. Refresh and try again.")
 			return
 		}
-		response.Error(c, http.StatusInternalServerError, "settingsUpdateFailed", "保存运行设置失败")
+		response.Error(c, http.StatusInternalServerError, "settingsUpdateFailed", "Failed to save runtime settings")
 		return
 	}
 	response.Success(c, http.StatusOK, newSettingsResponse(result))

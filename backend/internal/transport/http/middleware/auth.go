@@ -21,16 +21,16 @@ func AdminAuth(service *adminauth.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		raw, ok := bearerToken(c.GetHeader("Authorization"))
 		if !ok {
-			response.Error(c, http.StatusUnauthorized, "adminUnauthorized", "管理员登录已失效")
+			response.Error(c, http.StatusUnauthorized, "adminUnauthorized", "Admin session expired")
 			return
 		}
 		value, err := service.AuthenticateAccess(c.Request.Context(), raw)
 		if err != nil {
 			if errors.Is(err, adminauth.ErrRuntimeUnavailable) {
-				response.Error(c, http.StatusServiceUnavailable, "authRuntimeUnavailable", "管理员认证服务暂不可用")
+				response.Error(c, http.StatusServiceUnavailable, "authRuntimeUnavailable", "Admin authentication service is temporarily unavailable")
 				return
 			}
-			response.Error(c, http.StatusUnauthorized, "adminUnauthorized", "管理员登录已失效")
+			response.Error(c, http.StatusUnauthorized, "adminUnauthorized", "Admin session expired")
 			return
 		}
 		c.Set(AdminKey, value)
@@ -93,7 +93,7 @@ func clientErrorCode(err error) string {
 
 func clientErrorMessage(err error) string {
 	if errors.Is(err, clientkeyapp.ErrRuntimeUnavailable) {
-		return "网关运行态暂不可用，请稍后重试"
+		return "Gateway runtime store is temporarily unavailable. Please retry shortly."
 	}
 	return err.Error()
 }

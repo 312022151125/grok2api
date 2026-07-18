@@ -21,10 +21,10 @@ const defaultModelSyncWorkers = 25
 const syncFailurePersistTimeout = 5 * time.Second
 
 var (
-	ErrInvalidFilter = errors.New("模型筛选条件无效")
-	ErrInvalidInput  = errors.New("模型参数无效")
-	ErrNotFound      = errors.New("模型不存在")
-	ErrConflict      = errors.New("模型名称冲突")
+	ErrInvalidFilter = errors.New("Invalid model filter")
+	ErrInvalidInput  = errors.New("Invalid model parameters")
+	ErrNotFound      = errors.New("Model not found")
+	ErrConflict      = errors.New("Model name conflict")
 )
 
 type UpdateInput struct {
@@ -130,18 +130,18 @@ func (s *Service) GetByProviderUpstream(ctx context.Context, providerValue accou
 func (s *Service) Create(ctx context.Context, input CreateInput) (modeldomain.Route, error) {
 	publicID, validPublicID := modeldomain.NormalizePublicID(input.Provider, input.PublicID)
 	if !validPublicID {
-		return modeldomain.Route{}, invalidInput("publicId 不能为空、不能携带其他 Provider 前缀，且长度不能超过 255 个字符")
+		return modeldomain.Route{}, invalidInput("publicId cannot be empty, cannot carry another provider prefix, and must be at most 255 characters")
 	}
 	upstreamModel, validUpstreamModel := modeldomain.NormalizeUpstreamModel(input.Provider, input.UpstreamModel)
 	if !validUpstreamModel {
-		return modeldomain.Route{}, invalidInput("upstreamModel 必须属于所选 Provider 且长度为 1-255 个字符")
+		return modeldomain.Route{}, invalidInput("upstreamModel must belong to the selected provider and be 1-255 characters")
 	}
 	definition, err := s.validateProviderCapability(input.Provider, input.Capability)
 	if err != nil {
 		return modeldomain.Route{}, err
 	}
 	if definition.ModelCatalog == provider.ModelCatalogStatic && s.providers.QuotaMode(input.Provider, upstreamModel) == "" {
-		return modeldomain.Route{}, invalidInput(fmt.Sprintf("%s 仅支持内置模型目录中的上游模型", definition.ModelNamespace))
+		return modeldomain.Route{}, invalidInput(fmt.Sprintf("%s only supports upstream models from the built-in catalog", definition.ModelNamespace))
 	}
 	accountIDs, err := s.validateBoundAccounts(ctx, input.Provider, input.AccountIDs)
 	if err != nil {
@@ -163,7 +163,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (mod
 	if input.PublicID != nil {
 		publicID, ok := modeldomain.NormalizePublicID(value.Provider, *input.PublicID)
 		if !ok {
-			return modeldomain.Route{}, invalidInput("publicId 不能为空、不能携带其他 Provider 前缀，且长度不能超过 255 个字符")
+			return modeldomain.Route{}, invalidInput("publicId cannot be empty, cannot carry another provider prefix, and must be at most 255 characters")
 		}
 		value.PublicID = publicID
 	}
@@ -184,7 +184,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (mod
 
 func (s *Service) Delete(ctx context.Context, id uint64) error {
 	if id == 0 {
-		return invalidInput("模型 ID 无效")
+		return invalidInput("Invalid model ID")
 	}
 	return mapRepositoryError(s.models.Delete(ctx, id))
 }
@@ -199,7 +199,7 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 
 func (s *Service) ListBindableAccounts(ctx context.Context, providerValue account.Provider) ([]AccountOption, error) {
 	if !providerValue.IsValid() {
-		return nil, invalidInput("账号来源无效")
+		return nil, invalidInput("Invalid account provider")
 	}
 	values, _, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Offset: 0, Limit: 1000},
@@ -217,27 +217,27 @@ func (s *Service) ListBindableAccounts(ctx context.Context, providerValue accoun
 
 func (s *Service) validateProviderCapability(providerValue account.Provider, capability modeldomain.Capability) (provider.Definition, error) {
 	if !providerValue.IsValid() || s.providers == nil {
-		return provider.Definition{}, invalidInput("provider 无效")
+		return provider.Definition{}, invalidInput("Invalid provider")
 	}
 	definition, ok := s.providers.Definition(providerValue)
 	if !ok {
-		return provider.Definition{}, invalidInput("provider 未注册能力定义")
+		return provider.Definition{}, invalidInput("Provider has no registered capability definition")
 	}
 	if !definition.SupportsModelCapability(capability) {
-		return provider.Definition{}, invalidInput(fmt.Sprintf("%s 不支持 %s 能力", definition.ModelNamespace, capability))
+		return provider.Definition{}, invalidInput(fmt.Sprintf("%s does not support %s capability", definition.ModelNamespace, capability))
 	}
 	return definition, nil
 }
 
 func (s *Service) validateBoundAccounts(ctx context.Context, providerValue account.Provider, ids []uint64) ([]uint64, error) {
 	if len(ids) > 1000 {
-		return nil, invalidInput("单个模型最多绑定 1000 个账号")
+		return nil, invalidInput("A model can bind at most 1000 accounts")
 	}
 	unique := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("绑定账号 ID 无效")
+			return nil, invalidInput("Invalid bound account ID")
 		}
 		if _, exists := unique[id]; exists {
 			continue
@@ -261,7 +261,7 @@ func (s *Service) validateBoundAccounts(ctx context.Context, providerValue accou
 	}
 	for _, id := range result {
 		if !available[id] {
-			return nil, invalidInput(fmt.Sprintf("账号 %d 不存在或与模型来源不匹配", id))
+			return nil, invalidInput(fmt.Sprintf("Account %d does not exist or does not match the model provider", id))
 		}
 	}
 	return result, nil
@@ -295,11 +295,11 @@ func (s *Service) Sync(ctx context.Context) (int, error) {
 
 func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 	if s.providers == nil {
-		return 0, fmt.Errorf("Provider 注册表未初始化")
+		return 0, fmt.Errorf("Provider registry is not initialized")
 	}
 	providerValues := s.providers.Providers()
 	if len(providerValues) == 0 {
-		return 0, fmt.Errorf("没有已注册的 Provider")
+		return 0, fmt.Errorf("No registered providers")
 	}
 	credentials := make([]account.Credential, 0)
 	for _, providerValue := range providerValues {
@@ -310,12 +310,12 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 		credentials = append(credentials, values...)
 	}
 	if len(credentials) == 0 {
-		return 0, fmt.Errorf("没有可用于模型同步的账号")
+		return 0, fmt.Errorf("No accounts available for model sync")
 	}
 	results, summary, runErr := batch.Map(ctx, credentials, batch.Options{Workers: s.bulkPool.Limit(), Pool: s.bulkPool}, func(workCtx context.Context, value account.Credential) ([]string, error) {
 		adapter, ok := s.providers.Models(value.Provider)
 		if !ok {
-			return nil, fmt.Errorf("Provider %s 未注册模型同步能力", value.Provider)
+			return nil, fmt.Errorf("Provider %s has no registered model sync capability", value.Provider)
 		}
 		return s.syncAccountCapabilities(workCtx, value, adapter)
 	})
@@ -354,7 +354,7 @@ func (s *Service) syncAllAccounts(ctx context.Context) (int, error) {
 		if lastErr != nil {
 			return 0, lastErr
 		}
-		return 0, fmt.Errorf("没有账号成功同步模型")
+		return 0, fmt.Errorf("No accounts successfully synced models")
 	}
 	syncedModels := 0
 	for _, providerValue := range providerValues {
@@ -387,7 +387,7 @@ func (s *Service) SyncAccount(ctx context.Context, accountID uint64) (int, error
 	}
 	adapter, ok := s.providers.Models(credential.Provider)
 	if !ok {
-		return 0, fmt.Errorf("Provider %s 未注册", credential.Provider)
+		return 0, fmt.Errorf("Provider %s is not registered", credential.Provider)
 	}
 	models, err := s.syncAccountCapabilities(ctx, credential, adapter)
 	if err != nil {
@@ -492,16 +492,16 @@ func normalizePage(page, pageSize int) (int, int) {
 
 func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
-		return nil, invalidInput("至少选择一个模型")
+		return nil, invalidInput("Select at least one model")
 	}
 	if len(ids) > 500 {
-		return nil, invalidInput("单次最多处理 500 个模型")
+		return nil, invalidInput("At most 500 models can be processed at once")
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("模型 ID 无效")
+			return nil, invalidInput("Invalid model ID")
 		}
 		if _, ok := seen[id]; ok {
 			continue

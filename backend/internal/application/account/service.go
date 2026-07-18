@@ -21,21 +21,21 @@ import (
 )
 
 var (
-	ErrDevicePending  = errors.New("Device OAuth 等待用户授权")
-	ErrDeviceSlowDown = errors.New("Device OAuth 轮询过快")
-	ErrDeviceDenied   = errors.New("Device OAuth 已拒绝或过期")
-	ErrInvalidFilter  = errors.New("账号筛选条件无效")
-	ErrInvalidInput   = errors.New("账号参数无效")
-	ErrInvalidImport  = errors.New("账号凭据格式无效")
-	ErrImportLimit    = errors.New("导入账号数量超过限制")
-	ErrExportLimit    = errors.New("导出账号数量超过限制")
-	ErrExportEmpty    = errors.New("没有可导出的 Grok Build 账号")
-	ErrNotFound       = errors.New("账号不存在")
-	ErrUnsupported    = errors.New("账号来源不支持该操作")
-	ErrConversionBusy = errors.New("账号正在转换为 Grok Build")
+	ErrDevicePending  = errors.New("Device OAuth is waiting for user authorization")
+	ErrDeviceSlowDown = errors.New("Device OAuth is being polled too frequently")
+	ErrDeviceDenied   = errors.New("Device OAuth was denied or expired")
+	ErrInvalidFilter  = errors.New("Invalid account filter")
+	ErrInvalidInput   = errors.New("Invalid account parameters")
+	ErrInvalidImport  = errors.New("Invalid account credential format")
+	ErrImportLimit    = errors.New("Import account count exceeds the limit")
+	ErrExportLimit    = errors.New("Export account count exceeds the limit")
+	ErrExportEmpty    = errors.New("No Grok Build accounts available to export")
+	ErrNotFound       = errors.New("Account not found")
+	ErrUnsupported    = errors.New("This operation is not supported for the account source")
+	ErrConversionBusy = errors.New("Account is already converting to Grok Build")
 )
 
-var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token 已永久失效")
+var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token is permanently invalid")
 
 const (
 	estimatedFreeTokenLimit     int64         = 1_000_000
@@ -58,7 +58,7 @@ const (
 	accountTaskBatchSize                      = 1000
 )
 
-const permanentRefreshExpiredReason = "OAuth refresh token 已永久失效且 access token 已过期"
+const permanentRefreshExpiredReason = "OAuth refresh token is permanently invalid and the access token has expired"
 
 type webQuotaRefreshState struct {
 	pending bool
@@ -378,13 +378,13 @@ func (s *Service) BatchUpdate(ctx context.Context, ids []uint64, input UpdateInp
 		return 0, err
 	}
 	if input.MaxConcurrent != nil && (*input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent) {
-		return 0, invalidInput("maxConcurrent 必须在 1 到 256 之间")
+		return 0, invalidInput("maxConcurrent must be between 1 and 256")
 	}
 	if input.MinimumRemaining != nil && *input.MinimumRemaining < 0 {
-		return 0, invalidInput("minimumRemaining 不能小于零")
+		return 0, invalidInput("minimumRemaining cannot be negative")
 	}
 	if input.Name != nil {
-		return 0, invalidInput("批量更新不支持修改账号名称")
+		return 0, invalidInput("batch update does not support changing account name")
 	}
 	updated, err := s.accounts.UpdateMany(ctx, ids, repository.AccountUpdates{Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent, MinimumRemaining: input.MinimumRemaining})
 	if err != nil {
@@ -564,7 +564,7 @@ func isEstimatedFreeBillingProfile(billing *accountdomain.Billing) bool {
 func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, error) {
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return DeviceStartResult{}, fmt.Errorf("CLI Provider 未注册")
+		return DeviceStartResult{}, fmt.Errorf("CLI provider is not registered")
 	}
 	authorization, err := adapter.StartDeviceAuthorization(ctx)
 	if err != nil {
@@ -594,7 +594,7 @@ func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, 
 	}
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return View{}, fmt.Errorf("CLI Provider 未注册")
+		return View{}, fmt.Errorf("CLI provider is not registered")
 	}
 	seed, err := adapter.PollDeviceAuthorization(ctx, session.DeviceCode)
 	session.NextPollAt = now.Add(session.Interval)
@@ -641,7 +641,7 @@ func (s *Service) ImportCredentialsWithProgress(ctx context.Context, data []byte
 func (s *Service) ImportCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderBuild)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("CLI Provider 未注册")
+		return ImportResult{}, fmt.Errorf("CLI provider is not registered")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
@@ -664,7 +664,7 @@ func (s *Service) ImportWebCredentialsWithProgress(ctx context.Context, data []b
 func (s *Service) ImportWebCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderWeb)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Web Provider 未注册")
+		return ImportResult{}, fmt.Errorf("Grok Web provider is not registered")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
@@ -684,14 +684,14 @@ func (s *Service) ImportConsoleCredentialsWithProgress(ctx context.Context, data
 func (s *Service) ImportConsoleCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
+		return ImportResult{}, fmt.Errorf("Grok Console provider is not registered")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
 
 func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, adapter provider.CredentialCodecAdapter, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if len(documents) == 0 {
-		return ImportResult{}, fmt.Errorf("%w: 没有可导入的账号文件", ErrInvalidImport)
+		return ImportResult{}, fmt.Errorf("%w: no account files to import", ErrInvalidImport)
 	}
 	seeds := make([]provider.CredentialSeed, 0)
 	seen := make(map[string]struct{})
@@ -700,13 +700,13 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 		values, err := adapter.ParseImportedCredentials(document)
 		if err != nil {
 			if errors.Is(err, provider.ErrCredentialLimit) {
-				return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
+				return ImportResult{}, fmt.Errorf("%w: at most %d accounts can be imported at a time", ErrImportLimit, maxCredentialImportAccounts)
 			}
-			return ImportResult{}, fmt.Errorf("%w: 第 %d 个文件: %v", ErrInvalidImport, index+1, err)
+			return ImportResult{}, fmt.Errorf("%w: file %d: %v", ErrInvalidImport, index+1, err)
 		}
 		parsedAccounts += len(values)
 		if parsedAccounts > maxCredentialImportAccounts {
-			return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
+			return ImportResult{}, fmt.Errorf("%w: at most %d accounts can be imported at a time", ErrImportLimit, maxCredentialImportAccounts)
 		}
 		for _, value := range values {
 			if value.SourceKey != "" {
@@ -775,7 +775,7 @@ func (s *Service) SyncWebAccountsToConsoleWithProgress(ctx context.Context, ids 
 
 func (s *Service) SyncWebAccountsToConsoleWithStrategy(ctx context.Context, ids []uint64, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
+		return ImportResult{}, invalidInput("invalid Grok Web to Console sync strategy")
 	}
 	ids, err := normalizeIDs(ids, maxWebConsoleSyncAccounts)
 	if err != nil {
@@ -808,7 +808,7 @@ func (s *Service) SyncAllWebAccountsToConsoleWithProgress(ctx context.Context, o
 
 func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
+		return ImportResult{}, invalidInput("invalid Grok Web to Console sync strategy")
 	}
 	batchSize := accountTaskBatchSize
 	result := ImportResult{AccountIDs: make([]uint64, 0)}
@@ -862,23 +862,23 @@ func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, s
 func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []accountdomain.Credential, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
+		return ImportResult{}, fmt.Errorf("Grok Console provider is not registered")
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
 		if value.Provider != accountdomain.ProviderWeb || value.AuthType != accountdomain.AuthTypeSSO {
-			return ImportResult{}, fmt.Errorf("%w: 仅 Grok Web SSO 账号支持同步到 Console", ErrUnsupported)
+			return ImportResult{}, fmt.Errorf("%w: only Grok Web SSO accounts support sync to Console", ErrUnsupported)
 		}
 		token, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("解密 Grok Web SSO: %w", err)
+			return ImportResult{}, fmt.Errorf("decrypt Grok Web SSO: %w", err)
 		}
 		parsed, err := adapter.ParseImportedCredentials([]byte(token))
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: %w", err)
+			return ImportResult{}, fmt.Errorf("build Grok Console SSO credentials: %w", err)
 		}
 		if len(parsed) != 1 {
-			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: 预期 1 个账号，实际 %d 个", len(parsed))
+			return ImportResult{}, fmt.Errorf("build Grok Console SSO credentials: expected 1 account, got %d", len(parsed))
 		}
 		seed := parsed[0]
 		seed.Provider = accountdomain.ProviderConsole
@@ -887,7 +887,7 @@ func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []acco
 		if strings.TrimSpace(value.EncryptedCloudflareCookie) != "" {
 			cookies, decryptErr := s.cipher.Decrypt(value.EncryptedCloudflareCookie)
 			if decryptErr != nil {
-				return ImportResult{}, fmt.Errorf("解密 Grok Web Cloudflare Cookie: %w", decryptErr)
+				return ImportResult{}, fmt.Errorf("decrypt Grok Web Cloudflare cookie: %w", decryptErr)
 			}
 			seed.CloudflareCookies = cookies
 		}
@@ -923,7 +923,7 @@ func (s *Service) ConvertWebAccountsToBuildWithProgress(ctx context.Context, ids
 
 func (s *Service) ConvertWebAccountsToBuildWithStrategy(ctx context.Context, ids []uint64, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
+		return BuildConversionResult{}, invalidInput("invalid Grok Web to Build conversion strategy")
 	}
 	ids, err := normalizeIDs(ids, maxBuildConversionAccounts)
 	if err != nil {
@@ -959,7 +959,7 @@ func (s *Service) ConvertAllWebAccountsToBuildWithProgress(ctx context.Context, 
 
 func (s *Service) ConvertAllWebAccountsToBuildWithStrategy(ctx context.Context, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
+		return BuildConversionResult{}, invalidInput("invalid Grok Web to Build conversion strategy")
 	}
 	batchSize := accountTaskBatchSize
 	result := BuildConversionResult{BuildAccountIDs: make([]uint64, 0)}
@@ -1162,13 +1162,13 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 			return 0, false, false, mapRepositoryError(getErr)
 		}
 		if linkedBuild.Provider != accountdomain.ProviderBuild || strings.TrimSpace(linkedBuild.SourceKey) == "" {
-			return 0, false, false, fmt.Errorf("已关联 Grok Build 账号身份无效")
+			return 0, false, false, fmt.Errorf("linked Grok Build account identity is invalid")
 		}
 		linkedBuildSourceKey = linkedBuild.SourceKey
 	}
 	converter, ok := s.providers.BuildConverter(accountdomain.ProviderWeb)
 	if !ok {
-		return 0, false, false, fmt.Errorf("Grok Web SSO 转换能力未注册")
+		return 0, false, false, fmt.Errorf("Grok Web SSO conversion capability is not registered")
 	}
 	seed, err := converter.ConvertToBuild(ctx, value)
 	if err != nil {
@@ -1187,7 +1187,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 		return 0, false, false, err
 	}
 	if value.LinkedAccountID != 0 && buildAccount.ID != value.LinkedAccountID {
-		return 0, false, false, fmt.Errorf("重新转换后的 Grok Build 账号身份不一致")
+		return 0, false, false, fmt.Errorf("reconverted Grok Build account identity does not match")
 	}
 	if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
 		return 0, false, false, mapRepositoryError(err)
@@ -1199,7 +1199,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderBuild)
 	if !ok {
-		return ExportResult{}, fmt.Errorf("CLI Provider 未注册")
+		return ExportResult{}, fmt.Errorf("CLI provider is not registered")
 	}
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
@@ -1209,7 +1209,7 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	if total > maxCredentialExportAccounts {
-		return ExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
+		return ExportResult{}, fmt.Errorf("%w: at most 10000 accounts can be exported at a time", ErrExportLimit)
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
@@ -1218,14 +1218,14 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 		}
 		accessToken, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return ExportResult{}, fmt.Errorf("解密账号 %d access token: %w", value.ID, err)
+			return ExportResult{}, fmt.Errorf("decrypt account %d access token: %w", value.ID, err)
 		}
 		refreshToken, err := s.cipher.Decrypt(value.EncryptedRefreshToken)
 		if err != nil {
-			return ExportResult{}, fmt.Errorf("解密账号 %d refresh token: %w", value.ID, err)
+			return ExportResult{}, fmt.Errorf("decrypt account %d refresh token: %w", value.ID, err)
 		}
 		if accessToken == "" && refreshToken == "" {
-			return ExportResult{}, fmt.Errorf("账号 %d 没有可导出的 OAuth 凭据", value.ID)
+			return ExportResult{}, fmt.Errorf("account %d has no exportable OAuth credentials", value.ID)
 		}
 		seeds = append(seeds, provider.CredentialSeed{
 			Name: value.Name, Email: value.Email, UserID: value.UserID, TeamID: value.TeamID,
@@ -1249,7 +1249,7 @@ func (s *Service) ExportCLIProxyCredentials(ctx context.Context) (CLIProxyExport
 		return CLIProxyExportResult{}, err
 	}
 	if total > maxCredentialExportAccounts {
-		return CLIProxyExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
+		return CLIProxyExportResult{}, fmt.Errorf("%w: at most 10000 accounts can be exported at a time", ErrExportLimit)
 	}
 
 	now := s.now()
@@ -1262,14 +1262,14 @@ func (s *Service) ExportCLIProxyCredentials(ctx context.Context) (CLIProxyExport
 		}
 		accessToken, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return CLIProxyExportResult{}, fmt.Errorf("解密账号 %d access token: %w", value.ID, err)
+			return CLIProxyExportResult{}, fmt.Errorf("decrypt account %d access token: %w", value.ID, err)
 		}
 		refreshToken, err := s.cipher.Decrypt(value.EncryptedRefreshToken)
 		if err != nil {
-			return CLIProxyExportResult{}, fmt.Errorf("解密账号 %d refresh token: %w", value.ID, err)
+			return CLIProxyExportResult{}, fmt.Errorf("decrypt account %d refresh token: %w", value.ID, err)
 		}
 		if accessToken == "" && refreshToken == "" {
-			return CLIProxyExportResult{}, fmt.Errorf("账号 %d 没有可导出的 OAuth 凭据", value.ID)
+			return CLIProxyExportResult{}, fmt.Errorf("account %d has no exportable OAuth credentials", value.ID)
 		}
 		body, filename, err := cliprovider.MarshalCLIProxyAuthFile(
 			accessToken, refreshToken, value.Email, value.UserID,
@@ -1304,7 +1304,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
-			return View{}, invalidInput("账号名称不能为空")
+			return View{}, invalidInput("account name cannot be empty")
 		}
 	}
 	if input.Enabled != nil {
@@ -1315,13 +1315,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	}
 	if input.MaxConcurrent != nil {
 		if *input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent {
-			return View{}, invalidInput("maxConcurrent 必须在 1 到 256 之间")
+			return View{}, invalidInput("maxConcurrent must be between 1 and 256")
 		}
 		value.MaxConcurrent = *input.MaxConcurrent
 	}
 	if input.MinimumRemaining != nil {
 		if *input.MinimumRemaining < 0 {
-			return View{}, invalidInput("minimumRemaining 不能小于零")
+			return View{}, invalidInput("minimumRemaining cannot be negative")
 		}
 		value.MinimumRemaining = *input.MinimumRemaining
 	}
@@ -1329,15 +1329,15 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		value.EncryptedCloudflareCookie = ""
 	} else if input.CloudflareCookies != nil {
 		if value.Provider == accountdomain.ProviderBuild {
-			return View{}, invalidInput("Grok Build 账号不使用 Cloudflare Cookie")
+			return View{}, invalidInput("Grok Build accounts do not use Cloudflare cookies")
 		}
 		if len(*input.CloudflareCookies) > 16<<10 {
-			return View{}, invalidInput("Cloudflare Cookie 不能超过 16 KiB")
+			return View{}, invalidInput("Cloudflare cookies must not exceed 16 KiB")
 		}
 		if strings.TrimSpace(*input.CloudflareCookies) != "" {
 			cookies := egressapp.SanitizeCloudflareCookies(*input.CloudflareCookies)
 			if cookies == "" {
-				return View{}, invalidInput("Cloudflare Cookie 中没有有效字段")
+				return View{}, invalidInput("Cloudflare cookies contain no valid fields")
 			}
 			encrypted, encryptErr := s.cipher.Encrypt(cookies)
 			if encryptErr != nil {
@@ -1482,7 +1482,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 		}
 		adapter, ok := s.providers.CredentialRefresh(latest.Provider)
 		if !ok {
-			return nil, fmt.Errorf("Provider %s 未注册", latest.Provider)
+			return nil, fmt.Errorf("provider %s is not registered", latest.Provider)
 		}
 		refreshed, err := adapter.RefreshCredential(ctx, latest)
 		if err != nil {
@@ -1504,7 +1504,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 	}
 	credential, ok := result.(accountdomain.Credential)
 	if !ok {
-		return accountdomain.Credential{}, fmt.Errorf("账号凭据刷新返回类型无效")
+		return accountdomain.Credential{}, fmt.Errorf("account credential refresh returned an invalid type")
 	}
 	return credential, nil
 }
@@ -1660,7 +1660,7 @@ func (s *Service) RefreshBilling(ctx context.Context, id uint64) (accountdomain.
 	}
 	billing, ok := result.(accountdomain.Billing)
 	if !ok {
-		return accountdomain.Billing{}, fmt.Errorf("额度同步返回类型无效")
+		return accountdomain.Billing{}, fmt.Errorf("billing sync returned an invalid type")
 	}
 	return billing, nil
 }
@@ -1687,7 +1687,7 @@ func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdo
 	}
 	adapter, ok := s.providers.Billing(value.Provider)
 	if !ok {
-		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("Provider %s 未注册", value.Provider)
+		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("provider %s is not registered", value.Provider)
 	}
 	billing, err := adapter.GetBilling(ctx, value)
 	if err != nil {
@@ -1823,7 +1823,7 @@ func (s *Service) RefreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	windows, ok := result.([]accountdomain.QuotaWindow)
 	if !ok {
-		return nil, fmt.Errorf("Provider 额度同步返回类型无效")
+		return nil, fmt.Errorf("provider quota sync returned an invalid type")
 	}
 	return windows, nil
 }
@@ -1839,7 +1839,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return nil, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
+		return nil, fmt.Errorf("%s quota provider is not registered", value.Provider)
 	}
 	snapshot, err := adapter.SyncQuota(ctx, value)
 	if err != nil {
@@ -1862,7 +1862,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	for _, window := range snapshot.Windows {
 		if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 			if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				return snapshot.Windows, fmt.Errorf("安排额度恢复事件: %w", err)
+				return snapshot.Windows, fmt.Errorf("schedule quota recovery event: %w", err)
 			}
 		}
 	}
@@ -1919,7 +1919,7 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	window, ok := result.(accountdomain.QuotaWindow)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度同步返回类型无效")
+		return accountdomain.QuotaWindow{}, fmt.Errorf("provider mode quota sync returned an invalid type")
 	}
 	return window, nil
 }
@@ -1935,7 +1935,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
+		return accountdomain.QuotaWindow{}, fmt.Errorf("%s quota provider is not registered", value.Provider)
 	}
 	window, err := adapter.SyncQuotaMode(ctx, value, mode)
 	if err != nil {
@@ -1957,7 +1957,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 		if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: *window.ResetAt}); err != nil {
-			return window, fmt.Errorf("安排额度恢复事件: %w", err)
+			return window, fmt.Errorf("schedule quota recovery event: %w", err)
 		}
 	}
 	return window, nil
@@ -2129,7 +2129,7 @@ func (s *Service) SyncAllBilling(ctx context.Context) (int, int, error) {
 
 func (s *Service) SyncAllBillingWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, error) {
 	if s.providers == nil {
-		return 0, 0, fmt.Errorf("Provider 注册表未初始化")
+		return 0, 0, fmt.Errorf("provider registry is not initialized")
 	}
 	ids := make([]uint64, 0)
 	for _, providerValue := range s.providers.Providers() {
@@ -2189,7 +2189,7 @@ func (s *Service) RefreshAllTokens(ctx context.Context) (int, int, int, error) {
 
 func (s *Service) RefreshAllTokensWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, int, error) {
 	if s.providers == nil {
-		return 0, 0, 0, fmt.Errorf("Provider 注册表未初始化")
+		return 0, 0, 0, fmt.Errorf("provider registry is not initialized")
 	}
 	allIDs := make([]uint64, 0)
 	ids := make([]uint64, 0)
@@ -2315,7 +2315,7 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	if strings.TrimSpace(seed.CloudflareCookies) != "" {
 		cookies := egressapp.SanitizeCloudflareCookies(seed.CloudflareCookies)
 		if cookies == "" {
-			return accountdomain.Credential{}, invalidInput("Cloudflare Cookie 中没有有效字段")
+			return accountdomain.Credential{}, invalidInput("Cloudflare cookies contain no valid fields")
 		}
 		cloudflareEncrypted, err = s.cipher.Encrypt(cookies)
 		if err != nil {
@@ -2333,11 +2333,11 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	authType := seed.AuthType
 	if authType == "" {
 		if s.providers == nil {
-			return accountdomain.Credential{}, fmt.Errorf("Provider 注册表未初始化")
+			return accountdomain.Credential{}, fmt.Errorf("provider registry is not initialized")
 		}
 		definition, ok := s.providers.Definition(providerValue)
 		if !ok {
-			return accountdomain.Credential{}, fmt.Errorf("Provider %s 未注册", providerValue)
+			return accountdomain.Credential{}, fmt.Errorf("provider %s is not registered", providerValue)
 		}
 		authType = definition.Credential.AuthType
 	}
@@ -2364,16 +2364,16 @@ func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 
 func normalizeIDs(ids []uint64, limit int) ([]uint64, error) {
 	if len(ids) == 0 {
-		return nil, invalidInput("至少选择一个账号")
+		return nil, invalidInput("select at least one account")
 	}
 	if len(ids) > limit {
-		return nil, invalidInput(fmt.Sprintf("单次最多处理 %d 个账号", limit))
+		return nil, invalidInput(fmt.Sprintf("at most %d accounts can be processed at a time", limit))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("账号 ID 无效")
+			return nil, invalidInput("invalid account ID")
 		}
 		if _, ok := seen[id]; ok {
 			continue

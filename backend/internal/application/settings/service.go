@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	ErrInvalidInput = errors.New("运行设置参数无效")
-	ErrConflict     = errors.New("运行设置已被其他会话更新")
+	ErrInvalidInput = errors.New("Invalid runtime settings parameters")
+	ErrConflict     = errors.New("Runtime settings were updated in another session")
 )
 
 // ProviderBuildConfig 是管理接口使用的 Provider 可编辑输入。
@@ -160,7 +160,7 @@ func LoadPersisted(ctx context.Context, base config.Config, repository repositor
 	// 持久化层使用强类型时长，避免数据库格式受 HTTP DTO 字符串影响。
 	loaded := applyDomainConfig(base, value)
 	if err := loaded.Validate(); err != nil {
-		return config.Config{}, time.Time{}, 0, fmt.Errorf("校验运行设置: %w", err)
+		return config.Config{}, time.Time{}, 0, fmt.Errorf("validate runtime settings: %w", err)
 	}
 	return loaded, updatedAt, revision, nil
 }
@@ -237,7 +237,7 @@ func (s *Service) ReloadPersisted(ctx context.Context) error {
 	}
 	next := applyDomainConfig(current, value)
 	if err := next.Validate(); err != nil {
-		return fmt.Errorf("校验重载运行设置: %w", err)
+		return fmt.Errorf("validate reloaded runtime settings: %w", err)
 	}
 	s.mu.Lock()
 	s.cfg = next
@@ -436,7 +436,7 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	for _, item := range durations {
 		value, err := time.ParseDuration(strings.TrimSpace(item.value))
 		if err != nil {
-			return config.Config{}, fmt.Errorf("%s 必须是有效时长", item.path)
+			return config.Config{}, fmt.Errorf("%s must be a valid duration", item.path)
 		}
 		item.set(config.Duration(value))
 	}

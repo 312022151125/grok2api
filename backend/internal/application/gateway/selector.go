@@ -60,21 +60,21 @@ type SelectionUnavailableError struct {
 
 func (e *SelectionUnavailableError) Error() string {
 	if e == nil {
-		return "没有可用上游账号"
+		return "No available upstream account"
 	}
 	switch e.Reason {
 	case SelectionUnsupportedModel:
-		return "当前账号池不支持该模型"
+		return "The account pool does not support this model"
 	case SelectionCooling:
-		return "可用上游账号正在冷却"
+		return "Available upstream accounts are cooling down"
 	case SelectionModelCooling:
-		return "可用上游账号的目标模型正在冷却"
+		return "The target model on available accounts is cooling down"
 	case SelectionQuotaExhausted:
-		return "可用上游账号额度等待恢复"
+		return "Available upstream accounts are waiting for quota recovery"
 	case SelectionSaturated:
-		return "可用上游账号均达到并发上限"
+		return "Available upstream accounts are at concurrency capacity"
 	default:
-		return "没有可用上游账号"
+		return "No available upstream account"
 	}
 }
 
@@ -246,7 +246,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	if stickyKey != "" {
 		stickyID, ok, err := s.sticky.Get(ctx, stickyKey, now)
 		if err != nil {
-			return nil, fmt.Errorf("读取会话粘滞状态: %w", err)
+			return nil, fmt.Errorf("read sticky session state: %w", err)
 		}
 		if ok {
 			candidate, eligible := routingCandidateByID(normalCandidates, stickyID)
@@ -254,7 +254,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 				stickyTTL, _, _, _ := s.routingConfig()
 				boundID, bindErr := s.sticky.Bind(ctx, stickyKey, stickyID, now, now.Add(stickyTTL))
 				if bindErr != nil {
-					return nil, fmt.Errorf("刷新会话粘滞状态: %w", bindErr)
+					return nil, fmt.Errorf("refresh sticky session state: %w", bindErr)
 				}
 				if boundID != stickyID {
 					candidate, eligible = routingCandidateByID(normalCandidates, boundID)
@@ -320,7 +320,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 				boundID, bindErr := s.sticky.Bind(ctx, stickyKey, candidate.Credential.ID, currentTime, currentTime.Add(stickyTTL))
 				if bindErr != nil {
 					lease.Release()
-					return nil, fmt.Errorf("写入会话粘滞状态: %w", bindErr)
+					return nil, fmt.Errorf("write sticky session state: %w", bindErr)
 				}
 				if boundID != candidate.Credential.ID {
 					if boundCandidate, eligible := routingCandidateByID(normalCandidates, boundID); eligible {
@@ -338,7 +338,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 						// 已绑定账号满载时保留原绑定，本次请求使用已获取的临时账号。
 					} else if err := s.sticky.Set(ctx, stickyKey, candidate.Credential.ID, currentTime.Add(stickyTTL)); err != nil {
 						lease.Release()
-						return nil, fmt.Errorf("重建会话粘滞状态: %w", err)
+						return nil, fmt.Errorf("rebuild sticky session state: %w", err)
 					}
 				}
 			}
@@ -425,7 +425,7 @@ func (s *Selector) AcquirePinned(ctx context.Context, provider account.Provider,
 					if err != nil {
 						return nil, err
 					}
-					return nil, fmt.Errorf("绑定的上游账号恢复探测已被占用")
+					return nil, fmt.Errorf("bound upstream account recovery probe is already in use")
 				}
 				lease.QuotaProbe = true
 				lease.QuotaProbeKind = recovery.Kind
@@ -653,7 +653,7 @@ func (s *Selector) claimAccountSlot(ctx context.Context, value account.Credentia
 	}
 	release, acquired, err := s.concurrency.Acquire(ctx, accountConcurrencyKey(value.ID), limit)
 	if err != nil {
-		return nil, fmt.Errorf("获取账号并发租约: %w", err)
+		return nil, fmt.Errorf("acquire account concurrency lease: %w", err)
 	}
 	if !acquired {
 		return nil, nil

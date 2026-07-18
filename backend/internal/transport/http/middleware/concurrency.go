@@ -40,7 +40,7 @@ func (g *ConcurrencyGate) Middleware() gin.HandlerFunc {
 			g.mu.Unlock()
 			c.Header("Retry-After", "1")
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{
-				"code": "server_overloaded", "message": "服务并发已达到上限，请稍后重试", "param": nil, "type": "server_error",
+				"code": "server_overloaded", "message": "Server concurrency limit reached. Please retry shortly.", "param": nil, "type": "server_error",
 			}})
 			return
 		}

@@ -147,7 +147,7 @@ func TestReadAccountImportDocumentsAcceptsMultipleFiles(t *testing.T) {
 	ctx.Request = httptest.NewRequest("POST", "/api/admin/v1/accounts/import", &body)
 	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
 
-	documents, ok := readAccountImportDocuments(ctx, "账号凭据 JSON")
+	documents, ok := readAccountImportDocuments(ctx, "account credential JSON")
 	if !ok || len(documents) != 2 {
 		t.Fatalf("documents = %q, status = %d", documents, recorder.Code)
 	}

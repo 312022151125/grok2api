@@ -20,10 +20,10 @@ import (
 )
 
 var (
-	ErrQueueFull     = errors.New("审计写入队列已满")
-	ErrInvalidCursor = errors.New("审计游标无效")
-	ErrInvalidFilter = errors.New("审计筛选条件无效")
-	ErrInvalidPeriod = errors.New("审计时间范围无效")
+	ErrQueueFull     = errors.New("Audit write queue is full")
+	ErrInvalidCursor = errors.New("Invalid audit cursor")
+	ErrInvalidFilter = errors.New("Invalid audit filter")
+	ErrInvalidPeriod = errors.New("Invalid audit period")
 )
 
 type Period string

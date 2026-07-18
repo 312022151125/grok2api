@@ -46,7 +46,7 @@ func TestVideoGenerationUsesOfficialXAIEndpointsAndFields(t *testing.T) {
 	invalidDuration.Header.Set("Content-Type", "application/json")
 	invalidRecorder := httptest.NewRecorder()
 	router.ServeHTTP(invalidRecorder, invalidDuration)
-	if invalidRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidRecorder.Body.String(), "1 到 15") {
+	if invalidRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidRecorder.Body.String(), "1 and 15") {
 		t.Fatalf("invalid duration status=%d body=%s", invalidRecorder.Code, invalidRecorder.Body.String())
 	}
 
@@ -132,7 +132,7 @@ func TestGatewayErrorDoesNotExposeInternalDetails(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
-	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "postgres") || !strings.Contains(recorder.Body.String(), "上游服务暂不可用") {
+	if recorder.Code != http.StatusBadGateway || strings.Contains(recorder.Body.String(), "postgres") || !strings.Contains(recorder.Body.String(), "Upstream service is temporarily unavailable") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -142,20 +142,20 @@ func TestGatewayErrorHidesUpstreamCredentialStatus(t *testing.T) {
 	openAIRouter := gin.New()
 	openAIRouter.GET("/", func(c *gin.Context) {
 		writeGatewayError(c, &gateway.UpstreamFailure{
-			HTTPStatus: http.StatusForbidden, Code: "upstream_forbidden", PublicMessage: "上游拒绝了该请求",
+			HTTPStatus: http.StatusForbidden, Code: "upstream_forbidden", PublicMessage: "The upstream service rejected the request",
 			Cause: errors.New("secret upstream response"),
 		})
 	})
 	openAIRecorder := httptest.NewRecorder()
 	openAIRouter.ServeHTTP(openAIRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
-	if openAIRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(openAIRecorder.Body.String(), `"code":"upstream_unavailable"`) || strings.Contains(openAIRecorder.Body.String(), "secret") || strings.Contains(openAIRecorder.Body.String(), "拒绝") {
+	if openAIRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(openAIRecorder.Body.String(), `"code":"upstream_unavailable"`) || strings.Contains(openAIRecorder.Body.String(), "secret") || !strings.Contains(openAIRecorder.Body.String(), "Upstream service is temporarily unavailable") {
 		t.Fatalf("OpenAI status=%d body=%s", openAIRecorder.Code, openAIRecorder.Body.String())
 	}
 
 	anthropicRouter := gin.New()
 	anthropicRouter.GET("/", func(c *gin.Context) {
 		writeGatewayAnthropicError(c, &gateway.UpstreamFailure{
-			HTTPStatus: http.StatusTooManyRequests, Code: "upstream_rate_limited", PublicMessage: "上游请求频率受限",
+			HTTPStatus: http.StatusTooManyRequests, Code: "upstream_rate_limited", PublicMessage: "Upstream rate limit exceeded",
 		})
 	})
 	anthropicRecorder := httptest.NewRecorder()
@@ -167,12 +167,12 @@ func TestGatewayErrorHidesUpstreamCredentialStatus(t *testing.T) {
 	credentialRouter := gin.New()
 	credentialRouter.GET("/", func(c *gin.Context) {
 		writeGatewayAnthropicError(c, &gateway.UpstreamFailure{
-			HTTPStatus: http.StatusUnauthorized, Code: "upstream_unauthorized", PublicMessage: "上游账号认证失败",
+			HTTPStatus: http.StatusUnauthorized, Code: "upstream_unauthorized", PublicMessage: "Upstream account authentication failed",
 		})
 	})
 	credentialRecorder := httptest.NewRecorder()
 	credentialRouter.ServeHTTP(credentialRecorder, httptest.NewRequest(http.MethodGet, "/", nil))
-	if credentialRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(credentialRecorder.Body.String(), `"type":"overloaded_error"`) || strings.Contains(credentialRecorder.Body.String(), "认证") {
+	if credentialRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(credentialRecorder.Body.String(), `"type":"overloaded_error"`) || !strings.Contains(credentialRecorder.Body.String(), "Upstream service is temporarily unavailable") {
 		t.Fatalf("Anthropic credential status=%d body=%s", credentialRecorder.Code, credentialRecorder.Body.String())
 	}
 }
@@ -321,9 +321,9 @@ func TestImageGenerationEndpointValidatesXAIContractBeforeRouting(t *testing.T) 
 		body string
 		want string
 	}{
-		{name: "zero n", body: `{"model":"grok-imagine-image","prompt":"test","n":0}`, want: "n 必须在 1 到 10 之间"},
-		{name: "large n", body: `{"model":"grok-imagine-image","prompt":"test","n":11}`, want: "n 必须在 1 到 10 之间"},
-		{name: "storage options", body: `{"model":"grok-imagine-image","prompt":"test","storage_options":{"filename":"test.jpg"}}`, want: "不支持 storage_options"},
+		{name: "zero n", body: `{"model":"grok-imagine-image","prompt":"test","n":0}`, want: "n must be between 1 and 10"},
+		{name: "large n", body: `{"model":"grok-imagine-image","prompt":"test","n":11}`, want: "n must be between 1 and 10"},
+		{name: "storage options", body: `{"model":"grok-imagine-image","prompt":"test","storage_options":{"filename":"test.jpg"}}`, want: "does not support storage_options"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(test.body))
@@ -354,7 +354,7 @@ func TestImageEditAcceptsOfficialJSONShape(t *testing.T) {
 	missingImage.Header.Set("Content-Type", "application/json")
 	missingRecorder := httptest.NewRecorder()
 	router.ServeHTTP(missingRecorder, missingImage)
-	if missingRecorder.Code != http.StatusBadRequest || !strings.Contains(missingRecorder.Body.String(), "image 或 images") {
+	if missingRecorder.Code != http.StatusBadRequest || !strings.Contains(missingRecorder.Body.String(), "image or images") {
 		t.Fatalf("missing image status=%d body=%s", missingRecorder.Code, missingRecorder.Body.String())
 	}
 
@@ -377,7 +377,7 @@ func TestImageEditAcceptsOfficialJSONShape(t *testing.T) {
 	invalidResolution.Header.Set("Content-Type", "application/json")
 	invalidResolutionRecorder := httptest.NewRecorder()
 	router.ServeHTTP(invalidResolutionRecorder, invalidResolution)
-	if invalidResolutionRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidResolutionRecorder.Body.String(), "仅支持 resolution=1k") {
+	if invalidResolutionRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidResolutionRecorder.Body.String(), "only supports resolution=1k") {
 		t.Fatalf("invalid resolution status=%d body=%s", invalidResolutionRecorder.Code, invalidResolutionRecorder.Body.String())
 	}
 
@@ -388,7 +388,7 @@ func TestImageEditAcceptsOfficialJSONShape(t *testing.T) {
 	invalidCount.Header.Set("Content-Type", "application/json")
 	invalidCountRecorder := httptest.NewRecorder()
 	router.ServeHTTP(invalidCountRecorder, invalidCount)
-	if invalidCountRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidCountRecorder.Body.String(), "仅支持 n=1") {
+	if invalidCountRecorder.Code != http.StatusBadRequest || !strings.Contains(invalidCountRecorder.Body.String(), "only supports n=1") {
 		t.Fatalf("invalid count status=%d body=%s", invalidCountRecorder.Code, invalidCountRecorder.Body.String())
 	}
 
