@@ -16,6 +16,7 @@ import (
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
+	"github.com/chenyme/grok2api/backend/internal/pkg/resultcache"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 	"golang.org/x/sync/singleflight"
 )
@@ -56,9 +57,11 @@ const (
 	maxBuildConversionAccounts                = 1000
 	maxWebConsoleSyncAccounts                 = 1000
 	accountTaskBatchSize                      = 1000
+	buildBotFlagCacheTTL        time.Duration = 30 * time.Second
 )
 
 const permanentRefreshExpiredReason = "OAuth refresh token is permanently invalid and the access token has expired"
+const buildBotFlagCacheKey = "build-bot-flagged-account-ids"
 
 type webQuotaRefreshState struct {
 	pending bool
@@ -104,10 +107,11 @@ type QuotaView struct {
 }
 
 type View struct {
-	Credential   accountdomain.Credential
-	Billing      *accountdomain.Billing
-	Quota        QuotaView
-	QuotaWindows []accountdomain.QuotaWindow
+	Credential      accountdomain.Credential
+	Billing         *accountdomain.Billing
+	Quota           QuotaView
+	QuotaWindows    []accountdomain.QuotaWindow
+	BuildBotFlagged bool
 }
 
 type UpdateInput struct {
@@ -118,6 +122,10 @@ type UpdateInput struct {
 	MinimumRemaining       *float64
 	CloudflareCookies      *string
 	ClearCloudflareCookies bool
+	// BuildSuperEntitled 仅 grok_build 可设置；非 Build 返回业务错误。
+	BuildSuperEntitled *bool
+	// BuildRouteMode 仅 grok_build 可设置；nil 表示不修改。
+	BuildRouteMode *accountdomain.BuildRouteMode
 }
 
 type DeviceStartResult struct {
@@ -180,6 +188,7 @@ type ListFilter struct {
 	QuotaType string
 	Status    string
 	Renewal   string
+	Risk      string
 	Sort      repository.SortQuery
 }
 
@@ -188,6 +197,7 @@ type Summary struct {
 	Available  int64
 	Recovering int64
 	Attention  int64
+	Risk       int64
 	Providers  map[string]ProviderSummary
 	Recovery   RecoverySummary
 	Issues     IssueSummary
@@ -230,6 +240,11 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 	}
 	result.Recovering = result.Recovery.Cooldown + result.Recovery.WaitingReset + result.Recovery.Probing
 	result.Attention = result.Issues.Disabled + result.Issues.ReauthRequired
+	flaggedIDs, err := s.buildBotFlaggedAccountIDs(ctx)
+	if err != nil {
+		return Summary{}, err
+	}
+	result.Risk = int64(len(flaggedIDs))
 	return result, nil
 }
 
@@ -255,6 +270,7 @@ type Service struct {
 	syncPool              *batch.Pool
 	refreshPool           *batch.Pool
 	credentialRefreshWake chan struct{}
+	buildBotFlagCache     *resultcache.Cache[string, []uint64]
 	logger                *slog.Logger
 	now                   func() time.Time
 }
@@ -270,6 +286,7 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 		lastRefreshAt: make(map[uint64]time.Time), quotaRefreshes: make(map[string]*webQuotaRefreshState),
 		quotaRefreshQueue:     make(chan webQuotaRefreshRequest, webQuotaRefreshQueueSize),
 		credentialRefreshWake: make(chan struct{}, 1),
+		buildBotFlagCache:     resultcache.New[string, []uint64](1, buildBotFlagCacheTTL),
 		conversionPool:        batch.NewPool(25), syncPool: batch.NewPool(25), refreshPool: batch.NewPool(25), logger: slog.Default(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
@@ -310,7 +327,7 @@ func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Def
 
 func (s *Service) List(ctx context.Context, page, pageSize int, search string, filter ListFilter) ([]View, int64, error) {
 	page, pageSize = normalizePage(page, pageSize)
-	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
+	if (filter.Provider != "" && !accountdomain.Provider(filter.Provider).IsValid()) || !oneOf(filter.QuotaType, "", "free", "paid", "unknown", "auto", "basic", "super", "heavy") || !oneOf(filter.Status, "", "active", "disabled", "reauthRequired", "cooldown", "waitingReset", "probing") || !oneOf(filter.Renewal, "", "refreshable", "unrefreshable") || !oneOf(filter.Risk, "", "flagged", "normal") || (filter.Risk != "" && filter.Provider != string(accountdomain.ProviderBuild)) || !repository.IsValidSort(filter.Sort, "name", "type", "status", "createdAt") {
 		return nil, 0, ErrInvalidFilter
 	}
 	var refreshable *bool
@@ -318,9 +335,22 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		value := filter.Renewal == "refreshable"
 		refreshable = &value
 	}
+	repositoryFilter := repository.AccountListFilter{Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Refreshable: refreshable, Now: s.now()}
+	if filter.Risk != "" {
+		flaggedIDs, err := s.buildBotFlaggedAccountIDs(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		if filter.Risk == "flagged" {
+			repositoryFilter.AccountIDs = flaggedIDs
+			repositoryFilter.RestrictIDs = true
+		} else {
+			repositoryFilter.ExcludeIDs = flaggedIDs
+		}
+	}
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Offset: (page - 1) * pageSize, Limit: pageSize, Search: search, Sort: filter.Sort},
-		Filter: repository.AccountListFilter{Provider: filter.Provider, QuotaType: filter.QuotaType, Status: filter.Status, Refreshable: refreshable, Now: time.Now().UTC()},
+		Filter: repositoryFilter,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -347,7 +377,8 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 	}
 	views := make([]View, 0, len(values))
 	for _, value := range values {
-		view := View{Credential: value}
+		metadata := s.credentialMetadata(value)
+		view := View{Credential: value, BuildBotFlagged: metadata.BuildBotFlagged}
 		if billing, ok := billings[value.ID]; ok {
 			view.Billing = &billing
 		}
@@ -355,11 +386,47 @@ func (s *Service) List(ctx context.Context, page, pageSize int, search string, f
 		if recoveryValue, ok := recoveries[value.ID]; ok {
 			recovery = &recoveryValue
 		}
-		view.Quota = newQuotaView(view.Billing, observedTokens[value.ID], recovery, value.ObservedModel)
+		view.Quota = newQuotaView(view.Billing, observedTokens[value.ID], recovery, value.ObservedModel, value.BuildSuperEntitled && value.Provider == accountdomain.ProviderBuild)
 		view.QuotaWindows = quotaWindows[value.ID]
 		views = append(views, view)
 	}
 	return views, total, nil
+}
+
+func (s *Service) buildBotFlaggedAccountIDs(ctx context.Context) ([]uint64, error) {
+	if s.buildBotFlagCache == nil {
+		return s.loadBuildBotFlaggedAccountIDs(ctx)
+	}
+	return s.buildBotFlagCache.Load(ctx, buildBotFlagCacheKey, s.now(), func() ([]uint64, error) {
+		return s.loadBuildBotFlaggedAccountIDs(ctx)
+	})
+}
+
+func (s *Service) loadBuildBotFlaggedAccountIDs(ctx context.Context) ([]uint64, error) {
+	const batchSize = 500
+	result := make([]uint64, 0)
+	var afterID uint64
+	for {
+		values, _, err := s.accounts.ListProviderAccountBatch(ctx, accountdomain.ProviderBuild, afterID, batchSize)
+		if err != nil {
+			return nil, err
+		}
+		for _, value := range values {
+			if s.credentialMetadata(value).BuildBotFlagged {
+				result = append(result, value.ID)
+			}
+		}
+		if len(values) < batchSize {
+			return result, nil
+		}
+		afterID = values[len(values)-1].ID
+	}
+}
+
+func (s *Service) invalidateBuildBotFlagCache() {
+	if s.buildBotFlagCache != nil {
+		s.buildBotFlagCache.Delete(buildBotFlagCacheKey)
+	}
 }
 
 func oneOf(value string, allowed ...string) bool {
@@ -378,13 +445,13 @@ func (s *Service) BatchUpdate(ctx context.Context, ids []uint64, input UpdateInp
 		return 0, err
 	}
 	if input.MaxConcurrent != nil && (*input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent) {
-		return 0, invalidInput("maxConcurrent must be between 1 and 256")
+		return 0, invalidInput("maxConcurrent 必须在 1 到 256 之间")
 	}
 	if input.MinimumRemaining != nil && *input.MinimumRemaining < 0 {
-		return 0, invalidInput("minimumRemaining cannot be negative")
+		return 0, invalidInput("minimumRemaining 不能小于零")
 	}
 	if input.Name != nil {
-		return 0, invalidInput("batch update does not support changing account name")
+		return 0, invalidInput("批量更新不支持修改账号名称")
 	}
 	updated, err := s.accounts.UpdateMany(ctx, ids, repository.AccountUpdates{Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent, MinimumRemaining: input.MinimumRemaining})
 	if err != nil {
@@ -409,6 +476,9 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 		s.clearRefreshState(id)
 	}
 	deleted, err := s.accounts.DeleteMany(ctx, ids)
+	if err == nil {
+		s.invalidateBuildBotFlagCache()
+	}
 	return deleted, mapRepositoryError(err)
 }
 
@@ -417,7 +487,8 @@ func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
 	if err != nil {
 		return View{}, mapRepositoryError(err)
 	}
-	view := View{Credential: value}
+	metadata := s.credentialMetadata(value)
+	view := View{Credential: value, BuildBotFlagged: metadata.BuildBotFlagged}
 	if billing, err := s.accounts.GetBilling(ctx, id); err == nil {
 		view.Billing = &billing
 	} else if !errors.Is(err, repository.ErrNotFound) {
@@ -433,13 +504,20 @@ func (s *Service) Get(ctx context.Context, id uint64) (View, error) {
 	} else if !errors.Is(err, repository.ErrNotFound) {
 		return View{}, err
 	}
-	view.Quota = newQuotaView(view.Billing, observedTokens[id], recovery, value.ObservedModel)
+	view.Quota = newQuotaView(view.Billing, observedTokens[id], recovery, value.ObservedModel, value.BuildSuperEntitled && value.Provider == accountdomain.ProviderBuild)
 	if windows, err := s.accounts.GetQuotaWindows(ctx, []uint64{id}); err == nil {
 		view.QuotaWindows = windows[id]
 	} else {
 		return View{}, err
 	}
 	return view, nil
+}
+
+func (s *Service) credentialMetadata(value accountdomain.Credential) provider.CredentialMetadata {
+	if s.providers == nil {
+		return provider.CredentialMetadata{}
+	}
+	return s.providers.CredentialMetadata(value)
 }
 
 func (s *Service) ObserveResponseModel(ctx context.Context, id uint64, model string) error {
@@ -450,33 +528,8 @@ func (s *Service) ObserveResponseModel(ctx context.Context, id uint64, model str
 	return s.accounts.UpdateObservedModel(ctx, id, model, time.Now().UTC())
 }
 
-func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery *accountdomain.QuotaRecovery, observedModel string) QuotaView {
-	if recovery != nil && recovery.Status != accountdomain.QuotaRecoveryStatusActive && (recovery.Kind == "" || recovery.Kind == accountdomain.QuotaRecoveryKindFree) {
-		limit := recovery.ConfirmedLimit
-		used := recovery.ConfirmedUsed
-		if used <= 0 {
-			used = observedTokens
-		}
-		status := QuotaStatusWaitingReset
-		if recovery.Status == accountdomain.QuotaRecoveryStatusProbing {
-			status = QuotaStatusProbing
-		}
-		remaining := int64(0)
-		usagePercent := 0.0
-		if limit > 0 {
-			remaining = limit - used
-			if remaining < 0 {
-				remaining = 0
-			}
-			usagePercent = float64(used) / float64(limit) * 100
-		}
-		return QuotaView{
-			Type: QuotaTypeFree, Source: "upstreamExhaustion", Confidence: "confirmed", Unit: "tokens", Used: float64(used), Limit: float64(limit), LimitKnown: limit > 0,
-			Remaining: float64(remaining), UsagePercent: usagePercent,
-			WindowHours: int(freeUsageWindow / time.Hour), Confirmed: true, Status: status,
-			ExhaustedAt: recovery.ExhaustedAt, NextProbeAt: recovery.NextProbeAt, LastConfirmedAt: recovery.LastConfirmedAt,
-		}
-	}
+func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery *accountdomain.QuotaRecovery, observedModel string, buildSuperEntitled bool) QuotaView {
+	// Billing paid 优先：保留真实额度数值。
 	if billing != nil && billing.IsPaid() {
 		periodStart, periodEnd := billing.BillingPeriodStart, billing.BillingPeriodEnd
 		if billing.UsagePeriodType != "" {
@@ -521,6 +574,40 @@ func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery
 		}
 		return result
 	}
+	// 管理员确认的 Build Super entitlement：覆盖 Free recovery / profile / observed free 等弱信号。
+	// 不伪造额度、余额、使用率或账期；Billing 数值保持未知/零。
+	if buildSuperEntitled {
+		return QuotaView{
+			Type: QuotaTypePaid, Source: "buildSuperEntitlement", Confidence: "confirmed",
+			Confirmed: true, Status: QuotaStatusActive,
+		}
+	}
+	if recovery != nil && recovery.Status != accountdomain.QuotaRecoveryStatusActive && (recovery.Kind == "" || recovery.Kind == accountdomain.QuotaRecoveryKindFree) {
+		limit := recovery.ConfirmedLimit
+		used := recovery.ConfirmedUsed
+		if used <= 0 {
+			used = observedTokens
+		}
+		status := QuotaStatusWaitingReset
+		if recovery.Status == accountdomain.QuotaRecoveryStatusProbing {
+			status = QuotaStatusProbing
+		}
+		remaining := int64(0)
+		usagePercent := 0.0
+		if limit > 0 {
+			remaining = limit - used
+			if remaining < 0 {
+				remaining = 0
+			}
+			usagePercent = float64(used) / float64(limit) * 100
+		}
+		return QuotaView{
+			Type: QuotaTypeFree, Source: "upstreamExhaustion", Confidence: "confirmed", Unit: "tokens", Used: float64(used), Limit: float64(limit), LimitKnown: limit > 0,
+			Remaining: float64(remaining), UsagePercent: usagePercent,
+			WindowHours: int(freeUsageWindow / time.Hour), Confirmed: true, Status: status,
+			ExhaustedAt: recovery.ExhaustedAt, NextProbeAt: recovery.NextProbeAt, LastConfirmedAt: recovery.LastConfirmedAt,
+		}
+	}
 	freeSource := ""
 	confidence := ""
 	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(observedModel)), "-build-free") {
@@ -564,7 +651,7 @@ func isEstimatedFreeBillingProfile(billing *accountdomain.Billing) bool {
 func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, error) {
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return DeviceStartResult{}, fmt.Errorf("CLI provider is not registered")
+		return DeviceStartResult{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	authorization, err := adapter.StartDeviceAuthorization(ctx)
 	if err != nil {
@@ -594,7 +681,7 @@ func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, 
 	}
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return View{}, fmt.Errorf("CLI provider is not registered")
+		return View{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	seed, err := adapter.PollDeviceAuthorization(ctx, session.DeviceCode)
 	session.NextPollAt = now.Add(session.Interval)
@@ -641,7 +728,7 @@ func (s *Service) ImportCredentialsWithProgress(ctx context.Context, data []byte
 func (s *Service) ImportCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderBuild)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("CLI provider is not registered")
+		return ImportResult{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
@@ -664,7 +751,7 @@ func (s *Service) ImportWebCredentialsWithProgress(ctx context.Context, data []b
 func (s *Service) ImportWebCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderWeb)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Web provider is not registered")
+		return ImportResult{}, fmt.Errorf("Grok Web Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
@@ -684,14 +771,14 @@ func (s *Service) ImportConsoleCredentialsWithProgress(ctx context.Context, data
 func (s *Service) ImportConsoleCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console provider is not registered")
+		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
 
 func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, adapter provider.CredentialCodecAdapter, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if len(documents) == 0 {
-		return ImportResult{}, fmt.Errorf("%w: no account files to import", ErrInvalidImport)
+		return ImportResult{}, fmt.Errorf("%w: 没有可导入的账号文件", ErrInvalidImport)
 	}
 	seeds := make([]provider.CredentialSeed, 0)
 	seen := make(map[string]struct{})
@@ -700,13 +787,13 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 		values, err := adapter.ParseImportedCredentials(document)
 		if err != nil {
 			if errors.Is(err, provider.ErrCredentialLimit) {
-				return ImportResult{}, fmt.Errorf("%w: at most %d accounts can be imported at a time", ErrImportLimit, maxCredentialImportAccounts)
+				return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
 			}
-			return ImportResult{}, fmt.Errorf("%w: file %d: %v", ErrInvalidImport, index+1, err)
+			return ImportResult{}, fmt.Errorf("%w: 第 %d 个文件: %v", ErrInvalidImport, index+1, err)
 		}
 		parsedAccounts += len(values)
 		if parsedAccounts > maxCredentialImportAccounts {
-			return ImportResult{}, fmt.Errorf("%w: at most %d accounts can be imported at a time", ErrImportLimit, maxCredentialImportAccounts)
+			return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
 		}
 		for _, value := range values {
 			if value.SourceKey != "" {
@@ -775,7 +862,7 @@ func (s *Service) SyncWebAccountsToConsoleWithProgress(ctx context.Context, ids 
 
 func (s *Service) SyncWebAccountsToConsoleWithStrategy(ctx context.Context, ids []uint64, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("invalid Grok Web to Console sync strategy")
+		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
 	}
 	ids, err := normalizeIDs(ids, maxWebConsoleSyncAccounts)
 	if err != nil {
@@ -808,7 +895,7 @@ func (s *Service) SyncAllWebAccountsToConsoleWithProgress(ctx context.Context, o
 
 func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("invalid Grok Web to Console sync strategy")
+		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
 	}
 	batchSize := accountTaskBatchSize
 	result := ImportResult{AccountIDs: make([]uint64, 0)}
@@ -862,23 +949,23 @@ func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, s
 func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []accountdomain.Credential, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console provider is not registered")
+		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
 		if value.Provider != accountdomain.ProviderWeb || value.AuthType != accountdomain.AuthTypeSSO {
-			return ImportResult{}, fmt.Errorf("%w: only Grok Web SSO accounts support sync to Console", ErrUnsupported)
+			return ImportResult{}, fmt.Errorf("%w: 仅 Grok Web SSO 账号支持同步到 Console", ErrUnsupported)
 		}
 		token, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("decrypt Grok Web SSO: %w", err)
+			return ImportResult{}, fmt.Errorf("解密 Grok Web SSO: %w", err)
 		}
 		parsed, err := adapter.ParseImportedCredentials([]byte(token))
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("build Grok Console SSO credentials: %w", err)
+			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: %w", err)
 		}
 		if len(parsed) != 1 {
-			return ImportResult{}, fmt.Errorf("build Grok Console SSO credentials: expected 1 account, got %d", len(parsed))
+			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: 预期 1 个账号，实际 %d 个", len(parsed))
 		}
 		seed := parsed[0]
 		seed.Provider = accountdomain.ProviderConsole
@@ -887,7 +974,7 @@ func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []acco
 		if strings.TrimSpace(value.EncryptedCloudflareCookie) != "" {
 			cookies, decryptErr := s.cipher.Decrypt(value.EncryptedCloudflareCookie)
 			if decryptErr != nil {
-				return ImportResult{}, fmt.Errorf("decrypt Grok Web Cloudflare cookie: %w", decryptErr)
+				return ImportResult{}, fmt.Errorf("解密 Grok Web Cloudflare Cookie: %w", decryptErr)
 			}
 			seed.CloudflareCookies = cookies
 		}
@@ -923,7 +1010,7 @@ func (s *Service) ConvertWebAccountsToBuildWithProgress(ctx context.Context, ids
 
 func (s *Service) ConvertWebAccountsToBuildWithStrategy(ctx context.Context, ids []uint64, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("invalid Grok Web to Build conversion strategy")
+		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
 	}
 	ids, err := normalizeIDs(ids, maxBuildConversionAccounts)
 	if err != nil {
@@ -959,7 +1046,7 @@ func (s *Service) ConvertAllWebAccountsToBuildWithProgress(ctx context.Context, 
 
 func (s *Service) ConvertAllWebAccountsToBuildWithStrategy(ctx context.Context, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("invalid Grok Web to Build conversion strategy")
+		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
 	}
 	batchSize := accountTaskBatchSize
 	result := BuildConversionResult{BuildAccountIDs: make([]uint64, 0)}
@@ -1162,13 +1249,13 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 			return 0, false, false, mapRepositoryError(getErr)
 		}
 		if linkedBuild.Provider != accountdomain.ProviderBuild || strings.TrimSpace(linkedBuild.SourceKey) == "" {
-			return 0, false, false, fmt.Errorf("linked Grok Build account identity is invalid")
+			return 0, false, false, fmt.Errorf("已关联 Grok Build 账号身份无效")
 		}
 		linkedBuildSourceKey = linkedBuild.SourceKey
 	}
 	converter, ok := s.providers.BuildConverter(accountdomain.ProviderWeb)
 	if !ok {
-		return 0, false, false, fmt.Errorf("Grok Web SSO conversion capability is not registered")
+		return 0, false, false, fmt.Errorf("Grok Web SSO 转换能力未注册")
 	}
 	seed, err := converter.ConvertToBuild(ctx, value)
 	if err != nil {
@@ -1187,7 +1274,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 		return 0, false, false, err
 	}
 	if value.LinkedAccountID != 0 && buildAccount.ID != value.LinkedAccountID {
-		return 0, false, false, fmt.Errorf("reconverted Grok Build account identity does not match")
+		return 0, false, false, fmt.Errorf("重新转换后的 Grok Build 账号身份不一致")
 	}
 	if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
 		return 0, false, false, mapRepositoryError(err)
@@ -1199,7 +1286,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderBuild)
 	if !ok {
-		return ExportResult{}, fmt.Errorf("CLI provider is not registered")
+		return ExportResult{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
@@ -1209,7 +1296,7 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	if total > maxCredentialExportAccounts {
-		return ExportResult{}, fmt.Errorf("%w: at most 10000 accounts can be exported at a time", ErrExportLimit)
+		return ExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
@@ -1218,14 +1305,14 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 		}
 		accessToken, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return ExportResult{}, fmt.Errorf("decrypt account %d access token: %w", value.ID, err)
+			return ExportResult{}, fmt.Errorf("解密账号 %d access token: %w", value.ID, err)
 		}
 		refreshToken, err := s.cipher.Decrypt(value.EncryptedRefreshToken)
 		if err != nil {
-			return ExportResult{}, fmt.Errorf("decrypt account %d refresh token: %w", value.ID, err)
+			return ExportResult{}, fmt.Errorf("解密账号 %d refresh token: %w", value.ID, err)
 		}
 		if accessToken == "" && refreshToken == "" {
-			return ExportResult{}, fmt.Errorf("account %d has no exportable OAuth credentials", value.ID)
+			return ExportResult{}, fmt.Errorf("账号 %d 没有可导出的 OAuth 凭据", value.ID)
 		}
 		seeds = append(seeds, provider.CredentialSeed{
 			Name: value.Name, Email: value.Email, UserID: value.UserID, TeamID: value.TeamID,
@@ -1239,7 +1326,6 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 	return ExportResult{Data: data, Count: len(seeds)}, nil
 }
 
-// ExportCLIProxyCredentials 导出 Grok Build OAuth 为 CLIProxyAPI auth-dir 兼容文件（单账号 JSON 或多账号 ZIP）。
 func (s *Service) ExportCLIProxyCredentials(ctx context.Context) (CLIProxyExportResult, error) {
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
@@ -1296,6 +1382,16 @@ func (s *Service) ExportCLIProxyCredentials(ctx context.Context) (CLIProxyExport
 	return CLIProxyExportResult{Data: data, Count: len(entries), Filename: filename, ContentType: contentType}, nil
 }
 
+// CanUseBuildAPIFallback 仅允许 Billing 已确认付费的 Build 账号访问 XAI 回退地址。
+// 缺失或读取失败的 Billing 按无资格处理，由调用方 fail closed。
+func (s *Service) CanUseBuildAPIFallback(ctx context.Context, id uint64) (bool, error) {
+	billing, err := s.accounts.GetBilling(ctx, id)
+	if err != nil {
+		return false, mapRepositoryError(err)
+	}
+	return billing.IsPaid(), nil
+}
+
 func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (View, error) {
 	value, err := s.accounts.Get(ctx, id)
 	if err != nil {
@@ -1304,7 +1400,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
-			return View{}, invalidInput("account name cannot be empty")
+			return View{}, invalidInput("账号名称不能为空")
 		}
 	}
 	if input.Enabled != nil {
@@ -1315,13 +1411,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	}
 	if input.MaxConcurrent != nil {
 		if *input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent {
-			return View{}, invalidInput("maxConcurrent must be between 1 and 256")
+			return View{}, invalidInput("maxConcurrent 必须在 1 到 256 之间")
 		}
 		value.MaxConcurrent = *input.MaxConcurrent
 	}
 	if input.MinimumRemaining != nil {
 		if *input.MinimumRemaining < 0 {
-			return View{}, invalidInput("minimumRemaining cannot be negative")
+			return View{}, invalidInput("minimumRemaining 不能小于零")
 		}
 		value.MinimumRemaining = *input.MinimumRemaining
 	}
@@ -1329,15 +1425,15 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		value.EncryptedCloudflareCookie = ""
 	} else if input.CloudflareCookies != nil {
 		if value.Provider == accountdomain.ProviderBuild {
-			return View{}, invalidInput("Grok Build accounts do not use Cloudflare cookies")
+			return View{}, invalidInput("Grok Build 账号不使用 Cloudflare Cookie")
 		}
 		if len(*input.CloudflareCookies) > 16<<10 {
-			return View{}, invalidInput("Cloudflare cookies must not exceed 16 KiB")
+			return View{}, invalidInput("Cloudflare Cookie 不能超过 16 KiB")
 		}
 		if strings.TrimSpace(*input.CloudflareCookies) != "" {
 			cookies := egressapp.SanitizeCloudflareCookies(*input.CloudflareCookies)
 			if cookies == "" {
-				return View{}, invalidInput("Cloudflare cookies contain no valid fields")
+				return View{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 			}
 			encrypted, encryptErr := s.cipher.Encrypt(cookies)
 			if encryptErr != nil {
@@ -1345,6 +1441,21 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 			}
 			value.EncryptedCloudflareCookie = encrypted
 		}
+	}
+	if input.BuildSuperEntitled != nil {
+		if value.Provider != accountdomain.ProviderBuild {
+			return View{}, invalidInput("仅 Grok Build 账号支持设置 Build Super entitlement")
+		}
+		value.BuildSuperEntitled = *input.BuildSuperEntitled
+	}
+	if input.BuildRouteMode != nil {
+		if value.Provider != accountdomain.ProviderBuild {
+			return View{}, invalidInput("仅 Grok Build 账号支持设置上游地址")
+		}
+		if !input.BuildRouteMode.IsValid() {
+			return View{}, invalidInput("Build 上游地址必须是 auto、build 或 xai")
+		}
+		value.BuildRouteMode = *input.BuildRouteMode
 	}
 	updated, err := s.accounts.Update(ctx, value)
 	if err != nil {
@@ -1363,22 +1474,16 @@ func (s *Service) MarkBuildAPIFallback(ctx context.Context, id uint64, enabled b
 	return mapRepositoryError(s.accounts.MarkBuildAPIFallback(ctx, id, enabled))
 }
 
-// CanUseBuildAPIFallback 仅允许 Billing 已确认付费的 Build 账号访问 XAI 回退地址。
-// 缺失或读取失败的 Billing 按无资格处理，由调用方 fail closed。
-func (s *Service) CanUseBuildAPIFallback(ctx context.Context, id uint64) (bool, error) {
-	billing, err := s.accounts.GetBilling(ctx, id)
-	if err != nil {
-		return false, mapRepositoryError(err)
-	}
-	return billing.IsPaid(), nil
-}
-
 func (s *Service) Delete(ctx context.Context, id uint64) error {
 	if s.sticky != nil {
 		_ = s.sticky.DeleteByAccount(ctx, id)
 	}
 	s.clearRefreshState(id)
-	return mapRepositoryError(s.accounts.Delete(ctx, id))
+	err := s.accounts.Delete(ctx, id)
+	if err == nil {
+		s.invalidateBuildBotFlagCache()
+	}
+	return mapRepositoryError(err)
 }
 
 func (s *Service) MarkReauthRequired(ctx context.Context, id uint64, reason string) error {
@@ -1482,7 +1587,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 		}
 		adapter, ok := s.providers.CredentialRefresh(latest.Provider)
 		if !ok {
-			return nil, fmt.Errorf("provider %s is not registered", latest.Provider)
+			return nil, fmt.Errorf("Provider %s 未注册", latest.Provider)
 		}
 		refreshed, err := adapter.RefreshCredential(ctx, latest)
 		if err != nil {
@@ -1495,6 +1600,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 		if err != nil {
 			return nil, err
 		}
+		s.invalidateBuildBotFlagCache()
 		s.markRefreshSuccess(latest.ID, currentTime)
 		s.WakeCredentialRefresh()
 		return updated, nil
@@ -1504,7 +1610,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 	}
 	credential, ok := result.(accountdomain.Credential)
 	if !ok {
-		return accountdomain.Credential{}, fmt.Errorf("account credential refresh returned an invalid type")
+		return accountdomain.Credential{}, fmt.Errorf("账号凭据刷新返回类型无效")
 	}
 	return credential, nil
 }
@@ -1660,7 +1766,7 @@ func (s *Service) RefreshBilling(ctx context.Context, id uint64) (accountdomain.
 	}
 	billing, ok := result.(accountdomain.Billing)
 	if !ok {
-		return accountdomain.Billing{}, fmt.Errorf("billing sync returned an invalid type")
+		return accountdomain.Billing{}, fmt.Errorf("额度同步返回类型无效")
 	}
 	return billing, nil
 }
@@ -1687,7 +1793,7 @@ func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdo
 	}
 	adapter, ok := s.providers.Billing(value.Provider)
 	if !ok {
-		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("provider %s is not registered", value.Provider)
+		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("Provider %s 未注册", value.Provider)
 	}
 	billing, err := adapter.GetBilling(ctx, value)
 	if err != nil {
@@ -1823,7 +1929,7 @@ func (s *Service) RefreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	windows, ok := result.([]accountdomain.QuotaWindow)
 	if !ok {
-		return nil, fmt.Errorf("provider quota sync returned an invalid type")
+		return nil, fmt.Errorf("Provider 额度同步返回类型无效")
 	}
 	return windows, nil
 }
@@ -1839,7 +1945,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return nil, fmt.Errorf("%s quota provider is not registered", value.Provider)
+		return nil, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
 	snapshot, err := adapter.SyncQuota(ctx, value)
 	if err != nil {
@@ -1862,7 +1968,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	for _, window := range snapshot.Windows {
 		if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 			if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				return snapshot.Windows, fmt.Errorf("schedule quota recovery event: %w", err)
+				return snapshot.Windows, fmt.Errorf("安排额度恢复事件: %w", err)
 			}
 		}
 	}
@@ -1919,7 +2025,7 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	window, ok := result.(accountdomain.QuotaWindow)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("provider mode quota sync returned an invalid type")
+		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度同步返回类型无效")
 	}
 	return window, nil
 }
@@ -1935,7 +2041,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("%s quota provider is not registered", value.Provider)
+		return accountdomain.QuotaWindow{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
 	window, err := adapter.SyncQuotaMode(ctx, value, mode)
 	if err != nil {
@@ -1957,7 +2063,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 		if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: *window.ResetAt}); err != nil {
-			return window, fmt.Errorf("schedule quota recovery event: %w", err)
+			return window, fmt.Errorf("安排额度恢复事件: %w", err)
 		}
 	}
 	return window, nil
@@ -2129,7 +2235,7 @@ func (s *Service) SyncAllBilling(ctx context.Context) (int, int, error) {
 
 func (s *Service) SyncAllBillingWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, error) {
 	if s.providers == nil {
-		return 0, 0, fmt.Errorf("provider registry is not initialized")
+		return 0, 0, fmt.Errorf("Provider 注册表未初始化")
 	}
 	ids := make([]uint64, 0)
 	for _, providerValue := range s.providers.Providers() {
@@ -2189,7 +2295,7 @@ func (s *Service) RefreshAllTokens(ctx context.Context) (int, int, int, error) {
 
 func (s *Service) RefreshAllTokensWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, int, error) {
 	if s.providers == nil {
-		return 0, 0, 0, fmt.Errorf("provider registry is not initialized")
+		return 0, 0, 0, fmt.Errorf("Provider 注册表未初始化")
 	}
 	allIDs := make([]uint64, 0)
 	ids := make([]uint64, 0)
@@ -2297,6 +2403,7 @@ func (s *Service) persistSeed(ctx context.Context, seed provider.CredentialSeed)
 	}
 	stored, created, err := s.accounts.UpsertByIdentity(ctx, value)
 	if err == nil {
+		s.invalidateBuildBotFlagCache()
 		s.WakeCredentialRefresh()
 	}
 	return stored, created, err
@@ -2315,7 +2422,7 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	if strings.TrimSpace(seed.CloudflareCookies) != "" {
 		cookies := egressapp.SanitizeCloudflareCookies(seed.CloudflareCookies)
 		if cookies == "" {
-			return accountdomain.Credential{}, invalidInput("Cloudflare cookies contain no valid fields")
+			return accountdomain.Credential{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 		}
 		cloudflareEncrypted, err = s.cipher.Encrypt(cookies)
 		if err != nil {
@@ -2333,11 +2440,11 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	authType := seed.AuthType
 	if authType == "" {
 		if s.providers == nil {
-			return accountdomain.Credential{}, fmt.Errorf("provider registry is not initialized")
+			return accountdomain.Credential{}, fmt.Errorf("Provider 注册表未初始化")
 		}
 		definition, ok := s.providers.Definition(providerValue)
 		if !ok {
-			return accountdomain.Credential{}, fmt.Errorf("provider %s is not registered", providerValue)
+			return accountdomain.Credential{}, fmt.Errorf("Provider %s 未注册", providerValue)
 		}
 		authType = definition.Credential.AuthType
 	}
@@ -2364,16 +2471,16 @@ func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 
 func normalizeIDs(ids []uint64, limit int) ([]uint64, error) {
 	if len(ids) == 0 {
-		return nil, invalidInput("select at least one account")
+		return nil, invalidInput("至少选择一个账号")
 	}
 	if len(ids) > limit {
-		return nil, invalidInput(fmt.Sprintf("at most %d accounts can be processed at a time", limit))
+		return nil, invalidInput(fmt.Sprintf("单次最多处理 %d 个账号", limit))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("invalid account ID")
+			return nil, invalidInput("账号 ID 无效")
 		}
 		if _, ok := seen[id]; ok {
 			continue
