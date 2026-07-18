@@ -129,6 +129,7 @@ func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts", h.list)
 	router.GET("/accounts/summary", h.summary)
 	router.GET("/accounts/export", h.exportCredentials)
+	router.GET("/accounts/export/cliproxyapi", h.exportCLIProxyCredentials)
 	router.GET("/accounts/:id", h.get)
 	router.POST("/accounts/device/start", h.startDevice)
 	router.POST("/accounts/device/:sessionId/poll", h.pollDevice)
@@ -883,6 +884,20 @@ func (h *Handler) exportCredentials(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json; charset=utf-8", result.Data)
 }
 
+func (h *Handler) exportCLIProxyCredentials(c *gin.Context) {
+	result, err := h.service.ExportCLIProxyCredentials(c.Request.Context())
+	if err != nil {
+		h.writeServiceError(c, "accountExportFailed", err, http.StatusInternalServerError, "导出账号失败")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("Content-Disposition", `attachment; filename="`+result.Filename+`"`)
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Exported-Accounts", strconv.Itoa(result.Count))
+	c.Data(http.StatusOK, result.ContentType, result.Data)
+}
+
 func (h *Handler) syncInitial(ctx context.Context, accountIDs ...uint64) accountsyncapp.Result {
 	if h.sync == nil {
 		return accountsyncapp.Result{}
@@ -931,6 +946,8 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error, fall
 		response.Error(c, http.StatusBadRequest, "accountImportLimitExceeded", err.Error())
 	case errors.Is(err, accountapp.ErrExportLimit):
 		response.Error(c, http.StatusBadRequest, "accountExportLimitExceeded", err.Error())
+	case errors.Is(err, accountapp.ErrExportEmpty):
+		response.Error(c, http.StatusBadRequest, "accountExportEmpty", err.Error())
 	case errors.Is(err, accountapp.ErrInvalidInput), errors.Is(err, accountapp.ErrInvalidImport):
 		response.Error(c, http.StatusBadRequest, code, err.Error())
 	case errors.Is(err, accountapp.ErrNotFound):

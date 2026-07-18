@@ -13,6 +13,7 @@ import (
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -28,6 +29,7 @@ var (
 	ErrInvalidImport  = errors.New("账号凭据格式无效")
 	ErrImportLimit    = errors.New("导入账号数量超过限制")
 	ErrExportLimit    = errors.New("导出账号数量超过限制")
+	ErrExportEmpty    = errors.New("没有可导出的 Grok Build 账号")
 	ErrNotFound       = errors.New("账号不存在")
 	ErrUnsupported    = errors.New("账号来源不支持该操作")
 	ErrConversionBusy = errors.New("账号正在转换为 Grok Build")
@@ -156,6 +158,13 @@ type BatchProgressObserver func(completed, total int) error
 type ExportResult struct {
 	Data  []byte
 	Count int
+}
+
+type CLIProxyExportResult struct {
+	Data        []byte
+	Count       int
+	Filename    string
+	ContentType string
 }
 
 type BuildConversionResult struct {
@@ -1228,6 +1237,63 @@ func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 		return ExportResult{}, err
 	}
 	return ExportResult{Data: data, Count: len(seeds)}, nil
+}
+
+// ExportCLIProxyCredentials 导出 Grok Build OAuth 为 CLIProxyAPI auth-dir 兼容文件（单账号 JSON 或多账号 ZIP）。
+func (s *Service) ExportCLIProxyCredentials(ctx context.Context) (CLIProxyExportResult, error) {
+	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
+		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
+		Filter: repository.AccountListFilter{Provider: string(accountdomain.ProviderBuild), Now: s.now()},
+	})
+	if err != nil {
+		return CLIProxyExportResult{}, err
+	}
+	if total > maxCredentialExportAccounts {
+		return CLIProxyExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
+	}
+
+	now := s.now()
+	names := make([]string, 0, len(values))
+	ids := make([]uint64, 0, len(values))
+	entries := make([]cliprovider.CLIProxyAuthFile, 0, len(values))
+	for _, value := range values {
+		if value.Provider != accountdomain.ProviderBuild {
+			continue
+		}
+		accessToken, err := s.cipher.Decrypt(value.EncryptedAccessToken)
+		if err != nil {
+			return CLIProxyExportResult{}, fmt.Errorf("解密账号 %d access token: %w", value.ID, err)
+		}
+		refreshToken, err := s.cipher.Decrypt(value.EncryptedRefreshToken)
+		if err != nil {
+			return CLIProxyExportResult{}, fmt.Errorf("解密账号 %d refresh token: %w", value.ID, err)
+		}
+		if accessToken == "" && refreshToken == "" {
+			return CLIProxyExportResult{}, fmt.Errorf("账号 %d 没有可导出的 OAuth 凭据", value.ID)
+		}
+		body, filename, err := cliprovider.MarshalCLIProxyAuthFile(
+			accessToken, refreshToken, value.Email, value.UserID,
+			value.Enabled, value.Priority, value.ExpiresAt, value.LastRefreshAt, now, value.ID,
+		)
+		if err != nil {
+			return CLIProxyExportResult{}, err
+		}
+		entries = append(entries, cliprovider.CLIProxyAuthFile{Name: filename, Body: body})
+		names = append(names, filename)
+		ids = append(ids, value.ID)
+	}
+	if len(entries) == 0 {
+		return CLIProxyExportResult{}, ErrExportEmpty
+	}
+	disambiguated := cliprovider.DisambiguateCLIProxyFilenames(names, ids)
+	for i := range entries {
+		entries[i].Name = disambiguated[i]
+	}
+	data, filename, contentType, err := cliprovider.BuildCLIProxyAuthExport(entries)
+	if err != nil {
+		return CLIProxyExportResult{}, err
+	}
+	return CLIProxyExportResult{Data: data, Count: len(entries), Filename: filename, ContentType: contentType}, nil
 }
 
 func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (View, error) {

@@ -276,6 +276,31 @@ export async function apiDownload(path: string, retryAuth = true): Promise<Blob>
   return response.blob();
 }
 
+export async function apiDownloadWithFilename(path: string, retryAuth = true): Promise<{ blob: Blob; filename: string }> {
+  const headers = new Headers();
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  const response = await fetch(`${runtimeConfig.apiBaseUrl}${path}`, {
+    credentials: "include",
+    headers,
+  });
+  if (response.status === 401 && retryAuth) {
+    const refreshResult = await refreshAccessToken();
+    if (refreshResult === "refreshed") return apiDownloadWithFilename(path, false);
+    if (refreshResult === "unavailable") {
+      throw new ApiError(503, "sessionRefreshUnavailable", localizedErrorMessage("sessionRefreshUnavailable", "Unable to refresh the session. Please retry."));
+    }
+  }
+  if (!response.ok) {
+    await parseResponse(response, decodeNever);
+    throw new ApiError(response.status, "requestFailed", localizedErrorMessage("requestFailed", "The request failed"));
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const quoted = /filename="([^"]+)"/i.exec(disposition);
+  const unquoted = /filename=([^;]+)/i.exec(disposition);
+  const filename = (quoted?.[1] ?? unquoted?.[1]?.trim() ?? "cliproxyapi-xai-auth.json").replace(/^["']|["']$/g, "");
+  return { blob: await response.blob(), filename };
+}
+
 export type AdminDTO = {
   id: string;
   username: string;

@@ -1,4 +1,4 @@
-import { ApiError, apiDownload, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
+import { ApiError, apiDownload, apiDownloadWithFilename, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
 import { createObjectDecoder, createPaginatedDecoder, createValidatedDecoder, decodeBooleanResult, decodeCountResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 import { i18n } from "@/shared/i18n";
 import type { SortOrder } from "@/shared/lib/table-sort";
@@ -396,6 +396,10 @@ export function refreshAccountQuota(id: string): Promise<AccountDTO> {
 
 export function exportAccounts(): Promise<Blob> {
   return apiDownload("/api/admin/v1/accounts/export");
+}
+
+export function exportCLIProxyAccounts(): Promise<{ blob: Blob; filename: string }> {
+  return apiDownloadWithFilename("/api/admin/v1/accounts/export/cliproxyapi");
 }
 
 export function updateAccountsEnabled(ids: string[], enabled: boolean, provider: AccountProvider): Promise<{ updated: number }> {

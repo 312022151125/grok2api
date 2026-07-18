@@ -37,6 +37,7 @@ import {
   deleteAccounts,
   convertWebAccountsToBuild,
   exportAccounts,
+  exportCLIProxyAccounts,
   getAccountSummary,
   importAccounts,
   importConsoleAccounts,
@@ -97,6 +98,7 @@ export function AccountsPage() {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [exportCLIProxyOpen, setExportCLIProxyOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [conversionTargets, setConversionTargets] = useState<string[] | "all" | null>(null);
@@ -341,6 +343,16 @@ export function AccountsPage() {
       downloadAccountExport(blob);
       setExportOpen(false);
       toast.success(t("accounts.exported"));
+    },
+    onError: showError,
+  });
+
+  const exportCLIProxyMutation = useMutation({
+    mutationFn: exportCLIProxyAccounts,
+    onSuccess: ({ blob, filename }) => {
+      downloadBlob(blob, filename);
+      setExportCLIProxyOpen(false);
+      toast.success(t("accounts.exportedCLIProxy"));
     },
     onError: showError,
   });
@@ -647,6 +659,7 @@ export function AccountsPage() {
                       <>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setExportCLIProxyOpen(true)}><Download />{t("accounts.exportCLIProxyAuth")}</DropdownMenuItem>
                       </>
                     ) : null}
                   </DropdownMenuContent>
@@ -813,6 +826,13 @@ export function AccountsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      <AlertDialog open={exportCLIProxyOpen} onOpenChange={setExportCLIProxyOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportCLIProxyTitle")}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportCLIProxyDescription")}</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportCLIProxyMutation.isPending} onClick={() => exportCLIProxyMutation.mutate()}>{t("accounts.exportCLIProxyAuth")}</AlertDialogAction></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <Dialog open={deviceOpen} onOpenChange={setDeviceOpen}>
         <DialogContent className="max-w-[420px]">
           <DialogHeader>
@@ -924,13 +944,17 @@ export function AccountsPage() {
   );
 }
 
-function downloadAccountExport(blob: Blob): void {
+function downloadBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `grok2api-accounts-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.download = filename;
   anchor.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function downloadAccountExport(blob: Blob): void {
+  downloadBlob(blob, `grok2api-accounts-${new Date().toISOString().slice(0, 10)}.json`);
 }
 
 function AccountMetricPanel({ icon, label, value, detail, loading, tone }: { icon: ReactNode; label: string; value: string; detail: string; loading: boolean; tone: string }) {

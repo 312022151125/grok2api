@@ -32,6 +32,7 @@ func TestWriteServiceErrorUsesCredentialLimitCodes(t *testing.T) {
 	}{
 		{name: "import", err: fmt.Errorf("%w: too many", accountapp.ErrImportLimit), code: "accountImportLimitExceeded"},
 		{name: "export", err: fmt.Errorf("%w: too many", accountapp.ErrExportLimit), code: "accountExportLimitExceeded"},
+		{name: "exportEmpty", err: accountapp.ErrExportEmpty, code: "accountExportEmpty"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
