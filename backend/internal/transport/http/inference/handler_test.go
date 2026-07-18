@@ -489,6 +489,26 @@ func TestExtractUsageFromCompletedEvent(t *testing.T) {
 	}
 }
 
+func TestExtractUsageFromChatCompletionsBody(t *testing.T) {
+	metadata := extractMetadata([]byte(`{"id":"chatcmpl_1","model":"grok-4.5","usage":{"prompt_tokens":1000,"completion_tokens":200,"total_tokens":1200,"prompt_tokens_details":{"cached_tokens":800},"completion_tokens_details":{"reasoning_tokens":50},"cost_in_usd_ticks":123}}`))
+	usage := metadata.Usage
+	if usage.InputTokens != 1000 || usage.CachedInputTokens != 800 || usage.OutputTokens != 200 || usage.ReasoningTokens != 50 || usage.TotalTokens != 1200 || usage.CostInUSDTicks != 123 {
+		t.Fatalf("chat usage = %#v", usage)
+	}
+	if metadata.ResponseID != "chatcmpl_1" || usage.ResponseModel != "grok-4.5" {
+		t.Fatalf("chat metadata = %#v", metadata)
+	}
+}
+
+func TestExtractUsageFromAnthropicMessagesBody(t *testing.T) {
+	metadata := extractMetadata([]byte(`{"type":"message","usage":{"input_tokens":1000,"output_tokens":200,"cache_creation_input_tokens":10,"cache_read_input_tokens":800,"cost_in_usd_ticks":123}}`))
+	usage := metadata.Usage
+	if usage.InputTokens != 1000 || usage.CachedInputTokens != 800 || usage.OutputTokens != 200 || usage.ReasoningTokens != 0 || usage.CostInUSDTicks != 123 {
+		t.Fatalf("anthropic usage = %#v", usage)
+	}
+}
+
+
 func TestUsageInspectorHandlesChunkedSSE(t *testing.T) {
 	inspector := &responseInspector{}
 	inspector.Inspect([]byte("data: {\"response\":{\"id\":\"resp_stream\",\"usage\":{\"input_tokens\":2,"))
@@ -512,6 +532,17 @@ func TestUsageInspectorHandlesFinalEventWithoutNewline(t *testing.T) {
 		t.Fatalf("metadata = %#v", metadata)
 	}
 }
+
+func TestUsageInspectorParsesChatFinalChunkCacheAndReasoning(t *testing.T) {
+	inspector := &responseInspector{}
+	inspector.Inspect([]byte(`data: {"id":"chatcmpl_s","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":90},"completion_tokens_details":{"reasoning_tokens":5}}}`))
+	inspector.Finish()
+	usage := inspector.Metadata().Usage
+	if usage.CachedInputTokens != 90 || usage.ReasoningTokens != 5 || usage.InputTokens != 100 || usage.OutputTokens != 20 || usage.TotalTokens != 120 {
+		t.Fatalf("chat stream usage = %#v", usage)
+	}
+}
+
 
 func TestExtractMetadataPreservesLargeCostTicks(t *testing.T) {
 	metadata := extractMetadata([]byte(`{"id":"resp_cost","model":"grok-4.5","usage":{"input_tokens":1,"output_tokens":1,"cost_in_usd_ticks":9007199254740993}}`))
