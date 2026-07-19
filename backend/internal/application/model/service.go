@@ -478,24 +478,15 @@ func (s *Service) markCapabilitySyncFailed(accountID uint64, attemptedAt time.Ti
 }
 
 func normalizePage(page, pageSize int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 20
-	}
-	if pageSize > 100 {
-		pageSize = 100
-	}
-	return page, pageSize
+	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
 }
 
 func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return nil, invalidInput("Select at least one model")
 	}
-	if len(ids) > 500 {
-		return nil, invalidInput("At most 500 models can be processed at once")
+	if len(ids) > repository.MaxPageSize {
+		return nil, invalidInput(fmt.Sprintf("At most %d models can be processed at once", repository.MaxPageSize))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))

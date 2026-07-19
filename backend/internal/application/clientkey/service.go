@@ -365,24 +365,15 @@ func (s *Service) CleanupExpiredBilling(ctx context.Context, limit int) (int, er
 }
 
 func normalizePage(page, pageSize int) (int, int) {
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 {
-		pageSize = 20
-	}
-	if pageSize > 100 {
-		pageSize = 100
-	}
-	return page, pageSize
+	return repository.NormalizePage(page, pageSize, repository.DefaultPageSize)
 }
 
 func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 	if len(ids) == 0 {
 		return nil, invalidInput("select at least one key")
 	}
-	if len(ids) > 500 {
-		return nil, invalidInput("at most 500 keys per request")
+	if len(ids) > repository.MaxPageSize {
+		return nil, invalidInput(fmt.Sprintf("at most %d keys per request", repository.MaxPageSize))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
