@@ -14,7 +14,8 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/infra/persistence/relational"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
-	"github.com/chenyme/grok2api/backend/internal/infra/provider/web"
+	consoleprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/console"
+	webprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/web"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 )
 
@@ -137,9 +138,9 @@ func TestExportWebCredentialsRoundTripsImportFormat(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	sourceService := NewService(sourceRepository, nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	sourceService := NewService(sourceRepository, nil, nil, nil, provider.NewRegistry(&webprovider.Adapter{}), cipher, nil)
 	targetRepository := relational.NewAccountRepository(targetDB)
-	targetService := NewService(targetRepository, nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	targetService := NewService(targetRepository, nil, nil, nil, provider.NewRegistry(&webprovider.Adapter{}), cipher, nil)
 
 	result, err := sourceService.ExportWebCredentials(ctx)
 	if err != nil {
@@ -183,7 +184,7 @@ func TestExportWebCredentialsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := NewService(relational.NewAccountRepository(database), nil, nil, nil, provider.NewRegistry(&web.Adapter{}), cipher, nil)
+	service := NewService(relational.NewAccountRepository(database), nil, nil, nil, provider.NewRegistry(&webprovider.Adapter{}), cipher, nil)
 	if _, err := service.ExportWebCredentials(ctx); !errors.Is(err, ErrExportEmpty) {
 		t.Fatalf("error = %v, want ErrExportEmpty", err)
 	}
@@ -326,5 +327,98 @@ func TestExportCLIProxyCredentialsEmpty(t *testing.T) {
 	service := NewService(relational.NewAccountRepository(database), nil, nil, nil, provider.NewRegistry(adapter), cipher, nil)
 	if _, err := service.ExportCLIProxyCredentials(ctx); !errors.Is(err, ErrExportEmpty) {
 		t.Fatalf("error = %v, want ErrExportEmpty", err)
+	}
+}
+func TestExportProviderCredentialsRoundTripsSSOProviders(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		providerValue accountdomain.Provider
+		adapter       provider.Adapter
+		webTier       accountdomain.WebTier
+	}{
+		{name: "web", providerValue: accountdomain.ProviderWeb, adapter: webprovider.NewAdapter(webprovider.Config{}, nil, nil, nil, nil), webTier: accountdomain.WebTierSuper},
+		{name: "console", providerValue: accountdomain.ProviderConsole, adapter: consoleprovider.NewAdapter(consoleprovider.Config{}, nil, nil)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			nsfwAt := time.Date(2026, 7, 18, 8, 0, 0, 0, time.UTC)
+			tosAt := nsfwAt.Add(-time.Hour)
+			birthDateAt := tosAt.Add(-time.Hour)
+			database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "export-sso.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			if err := database.InitializeSchema(ctx); err != nil {
+				t.Fatal(err)
+			}
+			cipher, err := security.NewCipher(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := cipher.Encrypt("sso-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			cookies, err := cipher.Encrypt("cf_clearance=clearance-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository := relational.NewAccountRepository(database)
+			created, _, err := repository.UpsertByIdentity(ctx, accountdomain.Credential{
+				Provider: test.providerValue, AuthType: accountdomain.AuthTypeSSO, WebTier: test.webTier,
+				Name: test.name + "-account", SourceKey: test.name + "-export-test",
+				EncryptedAccessToken: token, EncryptedCloudflareCookie: cookies,
+				Enabled: true, AuthStatus: accountdomain.AuthStatusActive,
+				WebNSFWEnabledAt: &nsfwAt, WebTermsAcceptedAt: &tosAt,
+				WebTermsAcceptedVersion: accountdomain.CurrentWebTermsVersion, WebBirthDateSetAt: &birthDateAt,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 模拟旧账号先按 SSO 来源创建，后续身份同步再补齐邮箱与 user_id；
+			// 回导必须命中原账号，不能因新身份字段生成重复记录。
+			created.Email = test.name + "@example.com"
+			created.UserID = test.name + "-user-id"
+			if _, err := repository.Update(ctx, created); err != nil {
+				t.Fatal(err)
+			}
+			service := NewService(repository, nil, nil, nil, provider.NewRegistry(test.adapter), cipher, nil)
+
+			result, err := service.ExportProviderCredentials(ctx, test.providerValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			codec, ok := test.adapter.(provider.CredentialCodecAdapter)
+			if !ok {
+				t.Fatal("adapter does not implement credential codec")
+			}
+			values, err := codec.ParseImportedCredentials(result.Data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Count != 1 || len(values) != 1 || values[0].Provider != test.providerValue || values[0].AccessToken != "sso-token" || values[0].CloudflareCookies != "cf_clearance=clearance-token" || values[0].Email != test.name+"@example.com" || values[0].UserID != test.name+"-user-id" {
+				t.Fatalf("round-trip result = %#v, values = %#v", result, values)
+			}
+			if test.providerValue == accountdomain.ProviderWeb && (values[0].WebTier != accountdomain.WebTierSuper || values[0].WebNSFWEnabledAt == nil || !values[0].WebNSFWEnabledAt.Equal(nsfwAt) || values[0].WebTermsAcceptedAt == nil || !values[0].WebTermsAcceptedAt.Equal(tosAt) || values[0].WebTermsAcceptedVersion != accountdomain.CurrentWebTermsVersion || values[0].WebBirthDateSetAt == nil || !values[0].WebBirthDateSetAt.Equal(birthDateAt)) {
+				t.Fatalf("web metadata = %#v", values[0])
+			}
+			var imported ImportResult
+			if test.providerValue == accountdomain.ProviderWeb {
+				imported, err = service.ImportWebCredentialsWithProgress(ctx, result.Data, nil, nil)
+			} else {
+				imported, err = service.ImportConsoleCredentialsWithProgress(ctx, result.Data, nil, nil)
+			}
+			if err != nil || len(imported.AccountIDs) != 1 {
+				t.Fatalf("reimport result = %#v, error = %v", imported, err)
+			}
+			stored, err := repository.Get(ctx, imported.AccountIDs[0])
+			if err != nil || stored.Email != test.name+"@example.com" || stored.UserID != test.name+"-user-id" {
+				t.Fatalf("reimported account = %#v, error = %v", stored, err)
+			}
+			if test.providerValue == accountdomain.ProviderWeb && (stored.WebNSFWEnabledAt == nil || !stored.WebNSFWEnabledAt.Equal(nsfwAt) || stored.WebTermsAcceptedAt == nil || !stored.WebTermsAcceptedAt.Equal(tosAt) || stored.WebTermsAcceptedVersion != accountdomain.CurrentWebTermsVersion || stored.WebBirthDateSetAt == nil || !stored.WebBirthDateSetAt.Equal(birthDateAt)) {
+				t.Fatalf("reimported web metadata = %#v", stored)
+			}
+		})
 	}
 }
