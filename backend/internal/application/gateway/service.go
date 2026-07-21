@@ -37,6 +37,7 @@ var (
 	ErrResponseAccountUnavailable = errors.New("The upstream account bound to this Response is unavailable")
 	ErrResponseStateUnsupported   = errors.New("The target model does not support stateful Responses")
 	ErrConversationUnsupported    = errors.New("The target model does not support this conversation protocol")
+	ErrVideoInputTooLarge         = errors.New("Video reference images exceed 32 MiB")
 )
 
 const responseOwnershipTTL = 30 * 24 * time.Hour
@@ -56,7 +57,9 @@ type Input struct {
 	PromptCacheKey     string
 	PromptCacheSeed    string
 	PreviousResponseID string
-	Operation          audit.Operation
+	// GrokTurnIndex 仅透传真实 Grok Shell 客户端提供的轮次；服务端不推算或递增。
+	GrokTurnIndex string
+	Operation     audit.Operation
 }
 
 type Usage struct {
@@ -74,11 +77,19 @@ type Usage struct {
 }
 
 type Result struct {
-	StatusCode int
-	Status     string
-	Header     http.Header
-	Body       io.ReadCloser
-	Finalize   func(usage Usage, responseID, errorCode string)
+	StatusCode          int
+	Status              string
+	Header              http.Header
+	Body                io.ReadCloser
+	RecordStreamFailure func(StreamFailureDiagnostic)
+	Finalize            func(usage Usage, responseID, errorCode string)
+}
+
+// StreamFailureDiagnostic 是下游已收到 2xx headers 后，上游在流内返回失败终止事件的安全投影。
+// Body 只包含 Transport 提取的错误字段，仍会在 attempt recorder 中执行统一脱敏和容量限制。
+type StreamFailureDiagnostic struct {
+	Body          []byte
+	BodyTruncated bool
 }
 
 type auditRecorder interface {
@@ -457,10 +468,13 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	if usageKind, _ := s.providers.UsageKind(fallbackRoute.Provider); usageKind == provider.UsageEstimated {
 		usageSource = audit.UsageSourceEstimated
 	}
+	mediaSummary, _ := summarizeResponseMedia(input.Body)
+	logResponseMediaSummary(s.logger, input.RequestID, mediaSummary)
 	auditBase := audit.Record{
 		EventID: eventID, RequestID: input.RequestID, ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
 		ModelRouteID: fallbackRoute.ID, ModelPublicID: publicModel, ModelUpstreamModel: modeldomain.DisplayUpstreamModel(fallbackRoute.Provider, fallbackRoute.UpstreamModel),
 		Provider: string(fallbackRoute.Provider), Operation: operation, UsageSource: usageSource, Streaming: input.Streaming,
+		MediaInputImages: mediaSummary.InputImages,
 	}
 	if errors.Is(routeErr, clientkeyapp.ErrModelNotAllowed) {
 		record := auditBase
@@ -498,6 +512,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		adapter                 provider.ResponseAdapter
 		supportsStoredResponses bool
 		promptCacheKey          string
+		reasoningReplayKey      string
 		affinityKey             string
 		idempotencyID           string
 		pricingModel            string
@@ -508,6 +523,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		quotaProbeAttempted     bool
 		skip                    bool
 	}
+	responseStartedAt := startedAt
 	routeStates := make([]conversationRouteAttempt, 0, len(eligible))
 	for _, route := range eligible {
 		adapter, ok := s.providers.Responses(route.Provider)
@@ -520,18 +536,32 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 			return nil, ErrResponseStateUnsupported
 		}
 		promptCacheKey := ""
+		reasoningReplayKey := ""
 		affinityKey := ""
 		if route.Provider == accountdomain.ProviderBuild {
-			identity := resolveBuildSessionIdentity(
-				input.ClientKey.ID, route.Provider, route.UpstreamModel, input.PromptCacheKey, input.PromptCacheSeed,
-			)
+			identity := buildSessionIdentity{}
+			if ownership != nil && ownership.PromptCacheKey != "" {
+				identity.upstreamID = ownership.PromptCacheKey
+				identity.replayKey = ownership.ReasoningReplayKey
+			} else {
+				identity = resolveBuildSessionIdentity(
+					input.ClientKey.ID, route.Provider, route.UpstreamModel, input.PromptCacheKey, input.PromptCacheSeed,
+					input.Body,
+				)
+			}
 			promptCacheKey = identity.upstreamID
+			reasoningReplayKey = identity.replayKey
 			affinityKey = identity.affinityKey
+			if identity.upstreamID == "" {
+				s.logger.Debug("prompt_cache_session_empty", "request_id", input.RequestID, "model", route.UpstreamModel, "provider", route.Provider)
+			} else if identity.soft {
+				s.logger.Debug("prompt_cache_session_soft", "request_id", input.RequestID, "model", route.UpstreamModel)
+			}
 		}
 		idempotencyID, _ := security.NewOpaqueToken(18)
 		routeStates = append(routeStates, conversationRouteAttempt{
 			route: route, adapter: adapter, supportsStoredResponses: supportsStoredResponses,
-			promptCacheKey: promptCacheKey, affinityKey: affinityKey, idempotencyID: idempotencyID,
+			promptCacheKey: promptCacheKey, reasoningReplayKey: reasoningReplayKey, affinityKey: affinityKey, idempotencyID: idempotencyID,
 			pricingModel: s.providers.PricingModel(route.Provider, route.UpstreamModel),
 			quotaMode:    s.providers.QuotaMode(route.Provider, route.UpstreamModel),
 			excluded:     make(map[uint64]bool), failureFingerprints: make(map[string]int),
@@ -567,12 +597,14 @@ attemptRound:
 			adapter := state.adapter
 			supportsStoredResponses := state.supportsStoredResponses
 			promptCacheKey := state.promptCacheKey
+			reasoningReplayKey := state.reasoningReplayKey
 			affinityKey := state.affinityKey
 			idempotencyID := state.idempotencyID
 			quotaMode := state.quotaMode
 			forwardResponse := func(credential accountdomain.Credential, billing *accountdomain.Billing) (*provider.Response, error) {
 				started := time.Now()
-				response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: promptCacheKey, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
+				responseStartedAt = started
+				response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Billing: billing, Method: http.MethodPost, Path: path, Model: route.UpstreamModel, PromptCacheKey: promptCacheKey, ReasoningReplayKey: reasoningReplayKey, GrokTurnIndex: input.GrokTurnIndex, IdempotencyID: idempotencyID, Body: input.Body, Streaming: input.Streaming, NormalizeBody: true, Operation: string(operation)})
 				err = failureAttempts.captureResponse(credential, started, response, err)
 				timing.markUpstream(time.Since(started))
 				return response, err
@@ -880,7 +912,9 @@ attemptRound:
 						}
 					}
 					if supportsStoredResponses && operation == audit.OperationResponses && responseID != "" && response.StatusCode >= 200 && response.StatusCode < 300 {
-						_ = s.responses.Save(persistCtx, inferencedomain.ResponseOwnership{ResponseID: responseID, AccountID: accountID, ClientKeyID: input.ClientKey.ID, Provider: route.Provider, ExpiresAt: now.Add(responseOwnershipTTL), CreatedAt: now, UpdatedAt: now})
+						if err := s.responses.Save(persistCtx, inferencedomain.ResponseOwnership{ResponseID: responseID, AccountID: accountID, ClientKeyID: input.ClientKey.ID, Provider: route.Provider, PromptCacheKey: promptCacheKey, ReasoningReplayKey: reasoningReplayKey, ExpiresAt: now.Add(responseOwnershipTTL), CreatedAt: now, UpdatedAt: now}); err != nil {
+							s.logger.Error("response_ownership_save_failed", "response_id", responseID, "client_key_id", input.ClientKey.ID, "account_id", accountID, "provider", route.Provider, "error", err)
+						}
 					}
 					outcome := "failed"
 					if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
@@ -890,8 +924,11 @@ attemptRound:
 				})
 			}
 			response.Body = &firstByteReadCloser{ReadCloser: response.Body, mark: timing.markFirstBody}
+			recordStreamFailure := func(diagnostic StreamFailureDiagnostic) {
+				failureAttempts.captureStreamFailure(credential, responseStartedAt, response, diagnostic)
+			}
 			timingHandedOff = true
-			return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, Finalize: finalize}, nil
+			return &Result{StatusCode: response.StatusCode, Status: response.Status, Header: response.Header, Body: &finalizingBody{ReadCloser: response.Body, finalize: func() { finalize(Usage{}, "", "stream_closed") }}, RecordStreamFailure: recordStreamFailure, Finalize: finalize}, nil
 		}
 		if !progressed || ownership != nil {
 			break
