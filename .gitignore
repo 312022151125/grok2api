@@ -46,3 +46,25 @@ Thumbs.db
 /tmp/
 
 .worktrees/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.so
+*.egg
+.graphify/
+graphify-out/
+.graphify_*.json
+.graphify_python
+.claude/
+.worktrees/
+.vscode/
+.DS_Store
