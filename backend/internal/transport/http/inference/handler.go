@@ -70,8 +70,8 @@ func NewHandler(gatewayService *gateway.Service, models *modelapp.Service, maxBo
 	return &Handler{gateway: gatewayService, models: models, maxBodyBytes: maxBodyBytes, publicAPIBaseURL: baseURL}
 }
 
-// SetPublicAPIBaseURLResolver 让视频内容 URL 跟随运行设置热更新。
-// 应在 Register 前设置；请求处理期间只读取该函数。
+// SetPublicAPIBaseURLResolver makes video content URLs follow hot-updated runtime settings.
+// Set it before Register; request handling only reads the resolver.
 func (h *Handler) SetPublicAPIBaseURLResolver(resolve func() string) *Handler {
 	h.publicBaseURL = resolve
 	return h
@@ -180,7 +180,7 @@ func (h *Handler) listModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"object": "list", "data": newModelListItems(values)})
 }
 
-// newModelListItems 按下游公开名称去重，隐藏仅用于内部选路的 Provider 前缀。
+// newModelListItems deduplicates by downstream public name and hides Provider prefixes used only for internal routing.
 func newModelListItems(values []modeldomain.Route) []modelListItem {
 	data := make([]modelListItem, 0, len(values))
 	seen := make(map[string]bool, len(values))
@@ -230,8 +230,9 @@ func (h *Handler) createChatCompletion(c *gin.Context) {
 	result, err := h.gateway.CreateChatCompletion(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
-		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
-		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
+		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
+		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
+		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -271,8 +272,9 @@ func (h *Handler) createMessage(c *gin.Context) {
 	result, err := h.gateway.CreateMessage(c.Request.Context(), gateway.Input{
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
-		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body),
-		GrokTurnIndex:   c.GetHeader("x-grok-turn-idx"),
+		PromptCacheSeed:           extractPromptCacheSeed(c.Request.Header, body),
+		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
+		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
 	})
 	if err != nil {
 		writeGatewayAnthropicError(c, err)
@@ -818,7 +820,8 @@ func (h *Handler) handleCreate(c *gin.Context, compact bool) {
 		RequestID: requestIDValue, ClientKey: clientKey, PublicModel: request.Model,
 		Body: body, Streaming: request.Stream, PromptCacheKey: request.PromptCacheKey,
 		PromptCacheSeed: extractPromptCacheSeed(c.Request.Header, body), PreviousResponseID: request.PreviousResponseID,
-		GrokTurnIndex: c.GetHeader("x-grok-turn-idx"),
+		AllowClientToolCacheRoute: allowBuildClientToolCacheRoute(c.Request.Header),
+		GrokTurnIndex:             c.GetHeader("x-grok-turn-idx"),
 	}
 	var result *gateway.Result
 	if compact {
@@ -1362,7 +1365,8 @@ func hasUsageSignal(usage gateway.Usage) bool {
 		usage.ContextInputTokens > 0 || usage.ContextOutputTokens > 0
 }
 
-// mergeGatewayUsage 合并流式多帧 usage：非零字段覆盖，避免后到半截帧抹掉已解析缓存命中。
+// mergeGatewayUsage merges usage from multiple streaming frames; non-zero fields overwrite,
+// preventing a later partial frame from erasing an already parsed cache hit.
 func mergeGatewayUsage(base, next gateway.Usage) gateway.Usage {
 	if next.InputTokens > 0 {
 		base.InputTokens = next.InputTokens
