@@ -262,7 +262,7 @@ attemptRound:
 				// Egress 403 is not account-scoped; continue other platforms / next round.
 				continue
 			}
-			if isRetryableResponse(response) {
+			if isRetryableResponse(response, route.Provider) {
 				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
 				if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && response.StatusCode == http.StatusTooManyRequests && lease.QuotaMode != "" {
 					exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)

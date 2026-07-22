@@ -58,6 +58,15 @@ func TestListFilters(t *testing.T) {
 	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{ExcludeIDs: []uint64{free.ID}, Now: now}, 2)
 	refreshable := true
 	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Refreshable: &refreshable, Now: now}, 1)
+	boundNode := egressNodeModel{Name: "bound-filter", Scope: "grok_build", Enabled: true}
+	if err := database.db.WithContext(ctx).Create(&boundNode).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", free.ID).Update("egress_node_id", boundNode.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Egress: "bound", Now: now}, 1)
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{Egress: "unbound", Now: now}, 2)
 
 	// 零 Billing + build_super_entitled：paid 可查到，free 查不到。
 	entitled := accountModel{IdentityKey: testIdentityKey("entitled-zero"), Provider: "grok_build", Name: "entitled-zero", SourceKey: "entitled-zero", ObservedModel: "grok-build-free", Enabled: true, AuthStatus: "active", Priority: 1, BuildSuperEntitled: true}
@@ -173,6 +182,32 @@ func TestListFilters(t *testing.T) {
 	if err != nil || hasMore || len(secondAuditPage) != 1 || secondAuditPage[0].RequestID != "success" {
 		t.Fatalf("audit status second page = %#v, hasMore = %v, err = %v", secondAuditPage, hasMore, err)
 	}
+}
+
+func TestListFiltersRecognizesInferredFreeBilling(t *testing.T) {
+	ctx := context.Background()
+	database, err := OpenSQLite(ctx, filepath.Join(t.TempDir(), "inferred-free.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	value := accountModel{IdentityKey: testIdentityKey("inferred-free"), Provider: "grok_build", Name: "inferred-free", SourceKey: "inferred-free", Enabled: true, AuthStatus: "active", Priority: 1}
+	if err := database.db.WithContext(ctx).Create(&value).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.WithContext(ctx).Create(&billingModel{
+		AccountID: value.ID, IsUnifiedBillingUser: true, UsagePeriodType: "USAGE_PERIOD_TYPE_WEEKLY", SyncedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	accounts := NewAccountRepository(database)
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{QuotaType: "free", Now: now}, 1)
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{QuotaType: "paid", Now: now}, 0)
+	assertAccountFilterCount(t, ctx, accounts, repository.AccountListFilter{QuotaType: "unknown", Now: now}, 0)
 }
 
 func assertAccountFilterCount(t *testing.T, ctx context.Context, accounts *AccountRepository, filter repository.AccountListFilter, expected int64) {

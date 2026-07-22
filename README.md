@@ -154,6 +154,19 @@ pnpm dev
 
 ## 账号来源
 
+### Migrating accounts from the Python version
+
+The **Grok Web SSO tokens** used by the Python version can be migrated, but its database or original pool JSON cannot be imported directly. Export **TXT (one token per line)** from the Python v2 admin page, or extract the raw SSO tokens from the old storage. Then open `/accounts` in the Go version, select **Grok Web**, and use **Connect account → Quick import SSO** or **Import account files**.
+
+The Go Web importer accepts:
+
+- TXT: one raw token per line; `sso=<token>` and `sso=<token>; ...` are also accepted
+- JSON: `{"provider":"grok_web","accounts":[{"sso_token":"...","name":"optional","tier":"auto|basic|super|heavy"}]}`
+
+Python pool assignments, tags, status, quota, usage, cooldown, proxy, and Cloudflare metadata are not migrated. TXT imports use tier `auto` and resync upstream state. The Python version did not contain Grok Build OAuth credentials, so its pools cannot be imported under the **Grok Build** tab. Each import is limited to 1,000 files, 30 MiB total, and 10,000 accounts; wait for identity, quota, and model-capability synchronization after importing.
+
+## Models and routing
+
 | Provider | 认证方式 | 主要能力 |
 | :-- | :-- | :-- |
 | Grok Build | Device OAuth、OAuth JSON | 原生 Responses、Chat、Messages、Billing、模型同步 |
@@ -320,6 +333,14 @@ socks5h://Default.{account}:RESIN_PROXY_TOKEN@resin:2260
 运行时会按凭据自动渲染为 `grok_build_<ID>`、`grok_web_<ID>` 或 `grok_console_<ID>`，不同账号使用独立连接池、Resin 租约和 Cloudflare clearance。Web/Console 账号 JSON 可通过 `cloudflare_cookies` 写入账号级 Cookie；账号级配置优先于出口节点的公共 Cookie，敏感值不会通过管理 API 回显。
 
 粘性代理只会在请求尚未写入上游且错误明确属于代理连接阶段时，使用同一账号额外重试两次。`401`、`429`、额度耗尽、永久凭据错误、`UPSTREAM_REQUEST_FAILED`，以及可能已经提交的生成请求都不会在出口层自动重放。
+
+### Proxy operations and account allocation
+
+The admin console can import HTTP/SOCKS proxy lists from encrypted HTTP(S) subscription sources or pasted plain/Base64 text. It records proxy probe status, latency, and exit IP without exposing proxy credentials or subscription URLs.
+
+Accounts can be explicitly bound in batches to one enabled proxy node. Automatic allocation uses only recently healthy nodes, respects each node's optional account capacity, and balances automatic assignments when sufficient capacity exists. Manual bindings are never moved by automatic balancing.
+
+## Security and production guidance
 
 ## Build Super entitlement 与 XAI 推理回退
 
