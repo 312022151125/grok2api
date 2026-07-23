@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
 // UpstreamFailure 保存可安全暴露给下游和审计的上游失败分类，不包含响应正文或凭据。
@@ -20,6 +23,7 @@ type UpstreamFailure struct {
 	AccountID              uint64
 	AccountName            string
 	AccountScoped          bool
+	AccountBlocked         bool
 	PermanentAccountDenial bool
 	QuotaExhausted         bool
 	FreeQuotaExhausted     bool
@@ -99,17 +103,17 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 		failure.PublicMessage = "Upstream account authentication failed"
 		failure.AccountScoped = true
 		failure.CredentialRejected = true
+		failure.AccountBlocked = isDefinitiveAccountBlock(metadataText)
 	case http.StatusPaymentRequired:
 		failure.Code = "upstream_payment_required"
 		failure.PublicMessage = "Upstream account quota is insufficient"
 		failure.AccountScoped = true
 		failure.QuotaExhausted = true
-		// spending-limit is account-scoped, but its paid/free recovery kind depends on
-		// the selected account's billing snapshot and must be decided by the selector.
 		failure.FreeQuotaExhausted = isFreeQuotaExhaustion(metadataText)
 	case http.StatusForbidden:
 		failure.Code = "upstream_forbidden"
 		failure.PublicMessage = "The upstream service rejected the request"
+		failure.AccountBlocked = isDefinitiveAccountBlock(metadataText)
 		failure.PermanentAccountDenial = isPermanentAccountDenial(metadataText)
 		failure.ModelQuotaExhausted = isModelQuotaExhaustion(metadataText)
 		failure.FreeQuotaExhausted = failure.ModelQuotaExhausted || isFreeQuotaExhaustion(metadataText)
@@ -137,13 +141,23 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 
 func newTransportUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	code, message := "upstream_network_error", "Failed to connect to the upstream service"
-	if errors.Is(err, context.DeadlineExceeded) {
+	status := http.StatusBadGateway
+	if neterrorpkg.IsResponseHeaderTimeout(err) {
+		status, code, message = http.StatusGatewayTimeout, "upstream_header_timeout", "Upstream response header timed out"
+	} else if errors.Is(err, context.DeadlineExceeded) {
 		code, message = "upstream_timeout", "Upstream service timed out"
 	}
-	return &UpstreamFailure{
-		HTTPStatus: http.StatusBadGateway, Code: code, PublicMessage: message,
-		AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err,
+	return &UpstreamFailure{HTTPStatus: status, Code: code, PublicMessage: message, AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err}
+}
+
+func isRetryableTransportFailure(providerValue accountdomain.Provider, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
 	}
+	if neterrorpkg.IsResponseHeaderTimeout(err) {
+		return providerValue != accountdomain.ProviderBuild
+	}
+	return true
 }
 
 func newCredentialUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
@@ -177,6 +191,10 @@ func extractUpstreamErrorMetadata(body []byte) (string, string, string) {
 
 func isAccountScopedForbidden(text string) bool {
 	return containsAny(text, "quota", "billing", "subscription", "entitlement", "permission", "unauthorized", "authentication", "token", "usage-exhausted", "insufficient", "spending-limit")
+}
+
+func isDefinitiveAccountBlock(text string) bool {
+	return containsAny(text, "blocked-user", "user is blocked")
 }
 
 func isPermanentAccountDenial(text string) bool {

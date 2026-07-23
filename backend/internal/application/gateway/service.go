@@ -17,6 +17,7 @@ import (
 	"time"
 
 	accountapp "github.com/chenyme/grok2api/backend/internal/application/account"
+	auditapp "github.com/chenyme/grok2api/backend/internal/application/audit"
 	clientkeyapp "github.com/chenyme/grok2api/backend/internal/application/clientkey"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/domain/audit"
@@ -38,6 +39,7 @@ var (
 	ErrResponseStateUnsupported   = errors.New("The target model does not support stateful Responses")
 	ErrConversationUnsupported    = errors.New("The target model does not support this conversation protocol")
 	ErrVideoInputTooLarge         = errors.New("Video reference images exceed 32 MiB")
+	ErrLedgerUnavailable          = auditapp.ErrLedgerUnavailable
 )
 
 const responseOwnershipTTL = 30 * 24 * time.Hour
@@ -99,6 +101,19 @@ type auditRecorder interface {
 	Create(ctx context.Context, value audit.Record) error
 }
 
+type auditReadiness interface {
+	CheckLedgerReady() error
+}
+
+func (s *Service) checkLedgerReady() error {
+	if readiness, ok := s.audits.(auditReadiness); ok {
+		if err := readiness.CheckLedgerReady(); err != nil {
+			return ErrLedgerUnavailable
+		}
+	}
+	return nil
+}
+
 type routeResolver interface {
 	Get(ctx context.Context, id uint64) (modeldomain.Route, error)
 	GetByPublicID(ctx context.Context, publicID string) (modeldomain.Route, error)
@@ -118,27 +133,31 @@ type accountModelSyncer interface {
 
 // Service handles model routing, account selection, failover, and audit finalization.
 type Service struct {
-	models         routeResolver
-	audits         auditRecorder
-	accounts       *accountapp.Service
-	clientKeys     *clientkeyapp.Service
-	providers      *provider.Registry
-	selector       *Selector
-	responses      repository.ResponseRepository
-	maxAttempts    atomic.Int64
-	mediaJobs      repository.MediaJobRepository
-	mediaAssets    videoAssetStore
-	mediaQueue     chan string
-	mediaMu        sync.Mutex
-	mediaQueued    map[string]struct{}
-	mediaWorker    int
-	mediaQueueFull atomic.Uint64
-	logger         *slog.Logger
-	rateLimitMu    sync.Mutex
-	rateLimits     map[string]teamModelRateLimit
-	rateLimitTeams map[uint64]string
-	modelSyncMu    sync.Mutex
-	modelSyncing   map[uint64]struct{}
+	models                 routeResolver
+	audits                 auditRecorder
+	accounts               *accountapp.Service
+	clientKeys             *clientkeyapp.Service
+	providers              *provider.Registry
+	selector               *Selector
+	responses              repository.ResponseRepository
+	maxAttempts            atomic.Int64
+	mediaJobs              repository.MediaJobRepository
+	mediaAssets            videoAssetStore
+	mediaQueue             chan string
+	mediaMu                sync.Mutex
+	mediaQueued            map[string]struct{}
+	mediaWorker            int
+	mediaQueueFull         atomic.Uint64
+	logger                 *slog.Logger
+	rateLimitMu            sync.Mutex
+	rateLimits             map[string]teamModelRateLimit
+	rateLimitTeams         map[uint64]string
+	modelSyncMu            sync.Mutex
+	modelSyncing           map[uint64]struct{}
+	buildForbiddenReauthMu sync.RWMutex
+	buildForbiddenReauth   map[string]struct{}
+	buildForbiddenReauthOn atomic.Bool
+	requestTimeout         atomic.Int64
 }
 
 type teamModelRateLimit struct {
@@ -166,10 +185,32 @@ func NewService(models routeResolver, audits auditRecorder, accounts *accountapp
 		models: models, audits: audits, accounts: accounts, clientKeys: clientKeys, providers: providers,
 		selector: selector, responses: responses, logger: slog.Default(),
 		rateLimits: make(map[string]teamModelRateLimit), rateLimitTeams: make(map[uint64]string),
-		modelSyncing: make(map[uint64]struct{}),
+		modelSyncing: make(map[uint64]struct{}), buildForbiddenReauth: make(map[string]struct{}),
 	}
 	service.UpdateMaxAttempts(maxAttempts)
 	return service
+}
+
+func (s *Service) UpdateBuildForbiddenReauthPolicy(enabled bool, codes []string) {
+	s.buildForbiddenReauthMu.Lock()
+	s.buildForbiddenReauth = make(map[string]struct{}, len(codes))
+	for _, code := range codes {
+		if normalized := strings.ToLower(strings.TrimSpace(code)); normalized != "" {
+			s.buildForbiddenReauth[normalized] = struct{}{}
+		}
+	}
+	s.buildForbiddenReauthMu.Unlock()
+	s.buildForbiddenReauthOn.Store(enabled)
+}
+
+func (s *Service) shouldInvalidateBuildForbidden(failure *UpstreamFailure) bool {
+	if failure == nil || failure.HTTPStatus != http.StatusForbidden || !s.buildForbiddenReauthOn.Load() {
+		return false
+	}
+	s.buildForbiddenReauthMu.RLock()
+	_, ok := s.buildForbiddenReauth[strings.ToLower(strings.TrimSpace(failure.UpstreamCode))]
+	s.buildForbiddenReauthMu.RUnlock()
+	return ok
 }
 
 func teamModelRateLimitKey(providerValue accountdomain.Provider, teamFingerprint, upstreamModel string) string {
@@ -251,6 +292,13 @@ func (s *Service) SetLogger(logger *slog.Logger) {
 }
 
 func (s *Service) UpdateMaxAttempts(maxAttempts int) { s.maxAttempts.Store(int64(maxAttempts)) }
+
+func (s *Service) UpdateRequestTimeout(timeout time.Duration) {
+	if timeout < 0 {
+		timeout = 0
+	}
+	s.requestTimeout.Store(int64(timeout))
+}
 
 func (s *Service) CreateResponse(ctx context.Context, input Input) (*Result, error) {
 	input.Operation = audit.OperationResponses
@@ -412,6 +460,9 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
 	eventID := newAuditEventID()
+	if err := s.checkLedgerReady(); err != nil {
+		return nil, err
+	}
 	operation := input.Operation
 	if operation == "" {
 		operation = audit.OperationResponses
@@ -822,20 +873,21 @@ attemptRound:
 					})
 					failureHandled = true
 				}
-				if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
+				if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
+					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
+					s.selector.MarkQuotaStateChanged(credential.Provider)
+					failureHandled = true
+				} else if credential.Provider == accountdomain.ProviderBuild && s.providers.SupportsCredentialRefresh(credential.Provider) && s.shouldInvalidateBuildForbidden(lastFailure) {
+					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build forbidden response matched configured reauth policy")
+					s.selector.MarkQuotaStateChanged(credential.Provider)
+					failureHandled = true
+				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
 					if credential.Provider == accountdomain.ProviderBuild {
-						// A Build account can lack access to one chat model while its OAuth
-						// credential and video entitlement remain valid. Keep the denial
-						// model-scoped; only an actual credential rejection requires reauth.
 						s.selector.MarkModelAccessDenied(ctx, credential, route.UpstreamModel, retryAfter)
 					} else {
 						_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
 						s.selector.MarkQuotaStateChanged(credential.Provider)
 					}
-					failureHandled = true
-				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
-					s.selector.MarkQuotaStateChanged(credential.Provider)
 					failureHandled = true
 				}
 				if lastFailure.AccountScoped && !failureHandled {
@@ -853,6 +905,13 @@ attemptRound:
 				continue
 			}
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				if diagnostic := response.RecoveredPrimaryFailure; diagnostic != nil && credential.Provider == accountdomain.ProviderBuild {
+					failure := newHTTPUpstreamFailure(diagnostic.StatusCode, diagnostic.Body, credential.ID, credential.Name)
+					if s.shouldInvalidateBuildForbidden(failure) {
+						_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build forbidden response matched configured reauth policy")
+						s.selector.MarkQuotaStateChanged(credential.Provider)
+					}
+				}
 				s.selector.markSuccess(ctx, credential, lease.QuotaProbe)
 			}
 			accountID := credential.ID
@@ -901,9 +960,6 @@ attemptRound:
 					}
 					record.CreatedAt = now
 					applyAuditEgress(&record, egressTrace, route.Provider)
-					if err := s.audits.Create(persistCtx, record); err != nil {
-						s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
-					}
 					if usage.ResponseModel != "" {
 						_ = s.accounts.ObserveResponseModel(persistCtx, accountID, usage.ResponseModel)
 					}
@@ -925,6 +981,9 @@ attemptRound:
 						if err := s.responses.Save(persistCtx, inferencedomain.ResponseOwnership{ResponseID: responseID, AccountID: accountID, ClientKeyID: input.ClientKey.ID, Provider: route.Provider, PromptCacheKey: promptCacheKey, ReasoningReplayKey: reasoningReplayKey, ExpiresAt: now.Add(responseOwnershipTTL), CreatedAt: now, UpdatedAt: now}); err != nil {
 							s.logger.Error("response_ownership_save_failed", "response_id", responseID, "client_key_id", input.ClientKey.ID, "account_id", accountID, "provider", route.Provider, "error", err)
 						}
+					}
+					if err := s.audits.Create(persistCtx, record); err != nil {
+						s.logger.Error("request_usage_write_failed", "event_id", record.EventID, "request_id", input.RequestID, "error", err)
 					}
 					outcome := "failed"
 					if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
@@ -1261,7 +1320,7 @@ func isRetryableResponse(response *provider.Response, upstreamProvider accountdo
 // forcesAccountFailover scopes the Build billing-wall override to the Provider
 // whose 402 contract is known. Other Providers continue honoring X-Should-Retry.
 func forcesAccountFailover(status int, upstreamProvider accountdomain.Provider) bool {
-	return upstreamProvider == accountdomain.ProviderBuild && status == http.StatusPaymentRequired
+	return upstreamProvider == accountdomain.ProviderBuild && (status == http.StatusPaymentRequired || status == http.StatusForbidden)
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {

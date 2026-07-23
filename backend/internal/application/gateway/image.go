@@ -101,6 +101,9 @@ func (s *Service) executeImage(
 	requestedCount int,
 	inputImageCount int,
 ) (*Result, error) {
+	if err := s.checkLedgerReady(); err != nil {
+		return nil, err
+	}
 	ctx, egressTrace := infraegress.WithTrace(ctx)
 	startedAt := time.Now()
 	eventID := newAuditEventID()

@@ -44,6 +44,9 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if s.mediaJobs == nil || s.mediaQueue == nil {
 		return media.Job{}, fmt.Errorf("video job service is not configured")
 	}
+	if err := s.checkLedgerReady(); err != nil {
+		return media.Job{}, err
+	}
 	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0) {
 		return media.Job{}, fmt.Errorf("text-to-video requires a prompt; image-to-video may omit the prompt")
 	}

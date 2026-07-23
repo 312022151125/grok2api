@@ -1244,6 +1244,126 @@ func TestGatewayWebOwnershipDoesNotPersistRawPromptCacheKey(t *testing.T) {
 	}
 }
 
+func TestFinalizationCommitsOwnershipAndLocalQuotaBeforeSlowAudit(t *testing.T) {
+	ctx := context.Background()
+	database, err := relational.OpenSQLite(ctx, filepath.Join(t.TempDir(), "finalization-order.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.InitializeSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	accountRepo := relational.NewAccountRepository(database)
+	modelRepo := relational.NewModelRepository(database)
+	responseRepo := relational.NewResponseRepository(database)
+	keyRepo := relational.NewClientKeyRepository(database)
+	credential, _, err := accountRepo.UpsertByIdentity(ctx, account.Credential{
+		Provider: account.ProviderWeb, AuthType: account.AuthTypeSSO, WebTier: account.WebTierBasic,
+		Name: "web", SourceKey: "finalization-order", EncryptedAccessToken: "encrypted",
+		Enabled: true, AuthStatus: account.AuthStatusActive, MaxConcurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := accountRepo.SaveQuotaWindows(ctx, credential.ID, account.WebTierBasic, now, []account.QuotaWindow{{
+		AccountID: credential.ID, Mode: "fast", Remaining: 5, Total: 10, WindowSeconds: 3600,
+		Source: account.QuotaSourceUpstream, SyncedAt: &now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	const model = "grok-finalization-order"
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderWeb, []string{model}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{model}, now); err != nil {
+		t.Fatal(err)
+	}
+	key, err := keyRepo.Create(ctx, clientkey.Key{
+		Name: "key", Prefix: "finalization-order", SecretHash: strings.Repeat("e", 64), EncryptedSecret: "encrypted",
+		Enabled: true, RPMLimit: 60, MaxConcurrent: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := finalizationOrderAdapter{}
+	registry := provider.NewRegistry(adapter)
+	sticky := memory.NewStickyStore()
+	accountService := accountapp.NewService(accountRepo, nil, memory.NewDeviceSessionStore(), sticky, registry, testCipher(t), nil)
+	selector := NewSelector(accountRepo, memory.NewConcurrencyLimiter(), sticky, registry, time.Hour, time.Second, time.Minute)
+	audits := &blockingFinalizeAudit{started: make(chan struct{}), release: make(chan struct{})}
+	service := NewService(modelRepo, audits, accountService, clientkeyapp.NewService(keyRepo, nil, nil, 60, 4, nil), registry, selector, responseRepo, 1)
+
+	result, err := service.CreateResponse(ctx, Input{RequestID: "req-finalization-order", ClientKey: key, PublicModel: model, Body: []byte(`{"model":"grok-finalization-order","input":"hello"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(result.Body)
+	done := make(chan struct{})
+	go func() {
+		result.Finalize(Usage{}, "resp-finalization-order", "")
+		close(done)
+	}()
+	select {
+	case <-audits.started:
+	case <-time.After(time.Second):
+		t.Fatal("audit finalization did not start")
+	}
+	if _, err := responseRepo.Get(ctx, "resp-finalization-order", key.ID, time.Now().UTC()); err != nil {
+		t.Fatalf("response ownership was blocked by audit: %v", err)
+	}
+	windows, err := accountRepo.GetQuotaWindows(ctx, []uint64{credential.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows[credential.ID]) != 1 || windows[credential.ID][0].Remaining != 4 {
+		t.Fatalf("local quota was blocked by audit: %#v", windows[credential.ID])
+	}
+	close(audits.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("finalization did not finish")
+	}
+	_ = result.Body.Close()
+}
+
+type blockingFinalizeAudit struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (a *blockingFinalizeAudit) Create(ctx context.Context, _ audit.Record) error {
+	a.once.Do(func() { close(a.started) })
+	select {
+	case <-a.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type finalizationOrderAdapter struct{}
+
+func (finalizationOrderAdapter) Provider() account.Provider { return account.ProviderWeb }
+func (finalizationOrderAdapter) Definition() provider.Definition {
+	return provider.Definition{
+		Provider:     account.ProviderWeb,
+		Quota:        provider.QuotaRemoteWindow,
+		Conversation: provider.ConversationSurface{Responses: true, StoredResponses: true},
+		Inference:    provider.InferencePolicy{Usage: provider.UsageEstimated},
+	}
+}
+func (finalizationOrderAdapter) QuotaMode(string) string { return "fast" }
+func (finalizationOrderAdapter) TierOrder(string) []account.WebTier {
+	return []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+}
+func (finalizationOrderAdapter) ForwardResponse(context.Context, provider.ResponseResourceRequest) (*provider.Response, error) {
+	return &provider.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"resp-finalization-order"}`)), QuotaUnits: 1}, nil
+}
+
 func TestParseFreeQuotaExhaustion(t *testing.T) {
 	body := []byte(`{"error":{"code":"subscription:free-usage-exhausted","message":"tokens (actual/limit): 1065387/1000000; Usage resets over a rolling 24-hour window"}}`)
 	used, limit, exhausted := parseFreeQuotaExhaustion(body)
@@ -1486,6 +1606,35 @@ func TestBuildChatPermissionDenialDoesNotInvalidateVideoCredential(t *testing.T)
 	}
 	if len(candidates) != 1 || candidates[0].ModelQuotaBlock == nil || candidates[0].ModelQuotaBlock.Reason != "model_access_denied" {
 		t.Fatalf("model-scoped denial was not persisted: %#v", candidates)
+	}
+
+	if err := modelRepo.UpsertDiscovered(ctx, account.ProviderBuild, []string{"grok-chat-denied-opt-in"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelRepo.ReplaceAccountCapabilities(ctx, credential.ID, []string{"grok-chat-denied", "grok-chat-denied-opt-in"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	service.UpdateBuildForbiddenReauthPolicy(true, []string{"permission-denied"})
+	adapter.recoverDenied.Store(true)
+	refreshesBefore := adapter.refreshes.Load()
+	result, err := service.CreateResponse(ctx, Input{
+		RequestID: "req-chat-denied-opt-in", ClientKey: clientKey, PublicModel: "grok-chat-denied-opt-in",
+		Body: []byte(`{"model":"grok-chat-denied-opt-in","input":"hello"}`),
+	})
+	if err != nil {
+		t.Fatalf("recovered permission denial should keep the current request successful: %v", err)
+	}
+	_ = result.Body.Close()
+	result.Finalize(Usage{}, "", "")
+	invalidated, err := accountRepo.Get(ctx, credential.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalidated.AuthStatus != account.AuthStatusReauthRequired {
+		t.Fatalf("opt-in denial did not invalidate account: %#v", invalidated)
+	}
+	if adapter.refreshes.Load() != refreshesBefore {
+		t.Fatalf("opt-in denial performed a redundant refresh: before=%d after=%d", refreshesBefore, adapter.refreshes.Load())
 	}
 }
 
@@ -2057,10 +2206,11 @@ type systemicForbiddenAdapter struct {
 }
 
 type authRescueAdapter struct {
-	attempts  atomic.Int64
-	refreshes atomic.Int64
-	rejectAll atomic.Bool
-	denyChat  atomic.Bool
+	attempts      atomic.Int64
+	refreshes     atomic.Int64
+	rejectAll     atomic.Bool
+	denyChat      atomic.Bool
+	recoverDenied atomic.Bool
 }
 
 func (a *authRescueAdapter) Provider() account.Provider { return account.ProviderBuild }
@@ -2070,6 +2220,16 @@ func (a *authRescueAdapter) Definition() provider.Definition {
 func (a *authRescueAdapter) ForwardResponse(_ context.Context, request provider.ResponseResourceRequest) (*provider.Response, error) {
 	a.attempts.Add(1)
 	if a.denyChat.Load() {
+		if a.recoverDenied.Load() {
+			return &provider.Response{
+				StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header),
+				Body: io.NopCloser(strings.NewReader(`{"id":"resp-fallback","status":"completed","output":[]}`)),
+				RecoveredPrimaryFailure: &provider.DiagnosticResponse{
+					StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: make(http.Header),
+					Body: []byte(`{"code":"permission-denied","error":"Access to the chat endpoint is denied"}`),
+				},
+			}, nil
+		}
 		return &provider.Response{
 			StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: make(http.Header),
 			Body: io.NopCloser(strings.NewReader(`{"error":{"code":"permission_denied","message":"Access to the chat endpoint is denied"}}`)),
