@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,10 +27,13 @@ import (
 	mediadomain "github.com/chenyme/grok2api/backend/internal/domain/media"
 	modeldomain "github.com/chenyme/grok2api/backend/internal/domain/model"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
+
+const accountStateWriteTimeout = 3 * time.Second
 
 var (
 	ErrModelNotFound              = errors.New("Model not found or disabled")
@@ -211,6 +215,27 @@ func (s *Service) shouldInvalidateBuildForbidden(failure *UpstreamFailure) bool 
 	_, ok := s.buildForbiddenReauth[strings.ToLower(strings.TrimSpace(failure.UpstreamCode))]
 	s.buildForbiddenReauthMu.RUnlock()
 	return ok
+}
+
+func (s *Service) markReauthRequired(ctx context.Context, requestID string, credential accountdomain.Credential, reason string) bool {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), accountStateWriteTimeout)
+	defer cancel()
+	if err := s.accounts.MarkReauthRequired(writeCtx, credential.ID, reason); err != nil {
+		s.logger.Error("account_reauth_required_write_failed", "request_id", requestID, "account_id", credential.ID, "provider", credential.Provider, "error", err)
+		return false
+	}
+	s.selector.MarkQuotaStateChanged(credential.Provider)
+	return true
+}
+
+func isRetryableTransportFailure(providerValue accountdomain.Provider, err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if neterrorpkg.IsResponseHeaderTimeout(err) {
+		return providerValue != accountdomain.ProviderBuild
+	}
+	return true
 }
 
 func teamModelRateLimitKey(providerValue accountdomain.Provider, teamFingerprint, upstreamModel string) string {
@@ -747,105 +772,131 @@ attemptRound:
 			if response.ModelCatalogChanged {
 				s.queueAccountModelSync(credential.ID)
 			}
+		if response.StatusCode == http.StatusUnauthorized {
+			response.Body.Close()
+			if credential.AuthType == accountdomain.AuthTypeSSO {
+				s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
+				lease.Release()
+				lastErr = fmt.Errorf("%s SSO credentials are invalid", credential.Provider)
+				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
+				continue
+			}
+			if s.markPermanentlyUnrefreshableCredentialRejected(ctx, credential) {
+				lease.Release()
+				lastErr = accountapp.ErrCredentialRefreshPermanent
+				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
+				continue
+			}
+			state.authRecoveryAttempted[credential.ID] = true
+			refreshed, refreshErr := ensureCredential(credential, true)
+			if refreshErr == nil {
+				response, err = forwardResponse(refreshed, lease.Billing)
+				credential = refreshed
+			}
+			if refreshErr != nil || err != nil {
+				if errors.Is(refreshErr, accountapp.ErrCredentialRefreshPermanent) {
+					s.markCredentialRejectedAfterPermanentRefresh(ctx, credential)
+				}
+				lease.Release()
+				lastErr = firstError(refreshErr, err)
+				if refreshErr != nil {
+					lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
+				} else if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "Request canceled", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
+					break attemptRound
+				} else {
+					lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
+				}
+				continue
+			}
 			if response.StatusCode == http.StatusUnauthorized {
-				response.Body.Close()
-				if credential.AuthType == accountdomain.AuthTypeSSO {
-					s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
-					lease.Release()
-					lastErr = fmt.Errorf("%s SSO credentials are invalid", credential.Provider)
-					lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
-					continue
+				body, _ := readRetryableBody(response.Body)
+				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build OAuth credential rejected after refresh")
+				s.selector.MarkQuotaStateChanged(credential.Provider)
+				lease.Release()
+				lastErr = fmt.Errorf("upstream still returned 401 after refresh")
+				lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, body, credential.ID, credential.Name)
+				continue
+			}
+		}
+		egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden
+		finalEgressForbidden := egressForbidden && (attempt > 0 || attempt+1 >= baseAttempts)
+		// Classify 403 bodies before egress retry. Definitive blocked-account signals invalidate and rotate the account;
+		// all other 403 responses retain the egress retry path without penalizing the account.
+		if response.StatusCode == http.StatusForbidden {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			body, _ := readRetryableBody(response.Body)
+			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			if lastFailure.AccountBlocked {
+				failureHandled := s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s account is blocked", credential.Provider))
+				if lastFailure.AccountScoped && !failureHandled {
+					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 				}
-				if s.markPermanentlyUnrefreshableCredentialRejected(ctx, credential) {
-					lease.Release()
-					lastErr = accountapp.ErrCredentialRefreshPermanent
-					lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, nil, credential.ID, credential.Name)
-					continue
-				}
+				lease.Release()
+				lastErr = fmt.Errorf("upstream returned %d", response.StatusCode)
+				s.logger.Warn("upstream_request_failed", "request_id", input.RequestID, "account_id", credential.ID, "provider", credential.Provider, "status", response.StatusCode, "upstream_code", lastFailure.UpstreamCode, "account_scoped", lastFailure.AccountScoped, "account_blocked", true)
+				continue
+			}
+			if egressForbidden && !finalEgressForbidden {
+				// A non-blocking 403 is an egress/browser-session failure and must not penalize the account.
+				delete(state.excluded, credential.ID)
+				lease.Release()
+				lastErr = fmt.Errorf("Grok Web egress session was rejected by anti-bot rules")
+				continue
+			}
+			// Restore the consumed final non-blocking 403 body for the common response path.
+			response.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		if isRetryableResponse(response, route.Provider) && !finalEgressForbidden {
+			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
+			body, _ := readRetryableBody(response.Body)
+			lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
+			buildForbiddenReauth := credential.Provider == accountdomain.ProviderBuild && s.shouldInvalidateBuildForbidden(lastFailure)
+			if buildForbiddenReauth {
+				lastFailure.AccountScoped = true
+			}
+			// The adapter only allows auto Super accounts to fall back to XAI within the same request;
+			// 403 from non-Super accounts triggers account-level cooldown and rotation.
+			freeBuildForbidden := response.StatusCode == http.StatusForbidden && credential.Provider == accountdomain.ProviderBuild && !accountdomain.IsBuildSuper(credential, lease.Billing)
+			if lastFailure.AccountBlocked || buildForbiddenReauth {
+				freeBuildForbidden = false
+			}
+			if freeBuildForbidden {
+				lastFailure.AccountScoped = true
+			}
+			if response.StatusCode == http.StatusTooManyRequests && response.RateLimit != nil && response.RateLimit.TeamID != "" && response.RateLimit.Model == route.UpstreamModel {
+				limited := s.markTeamModelRateLimit(credential, route.UpstreamModel, *response.RateLimit, time.Now().UTC())
+				lastFailure.AccountScoped = false
+				lastFailure.Fingerprint = "429:team_model_rate_limit"
+				lastFailure.RetryAfter = time.Until(limited.Until)
+				lease.Release()
+				lastErr = fmt.Errorf("upstream team and model rate limited")
+				s.logger.Warn("upstream_team_model_rate_limited", "request_id", input.RequestID, "provider", credential.Provider, "model", route.UpstreamModel, "team_fingerprint", limited.TeamFingerprint, "scope", response.RateLimit.Scope, "actual", response.RateLimit.Actual, "limit", response.RateLimit.Limit, "retry_after", lastFailure.RetryAfter)
+				continue
+			}
+			if s.providers.SupportsCredentialRefresh(credential.Provider) && !state.authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && !lastFailure.AccountBlocked && !buildForbiddenReauth && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
 				state.authRecoveryAttempted[credential.ID] = true
 				refreshed, refreshErr := ensureCredential(credential, true)
-				if refreshErr == nil {
-					response, err = forwardResponse(refreshed, lease.Billing)
-					credential = refreshed
-				}
-				if refreshErr != nil || err != nil {
-					if errors.Is(refreshErr, accountapp.ErrCredentialRefreshPermanent) {
-						s.markCredentialRejectedAfterPermanentRefresh(ctx, credential)
-					}
+				if refreshErr != nil {
 					lease.Release()
-					lastErr = firstError(refreshErr, err)
-					if refreshErr != nil {
-						lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
-					} else if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					lastErr = refreshErr
+					lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
+					continue
+				}
+				response, err = forwardResponse(refreshed, lease.Billing)
+				credential = refreshed
+				if err != nil {
+					lease.Release()
+					lastErr = err
+					if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 						lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "Request canceled", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
 						break attemptRound
-					} else {
-						lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 					}
+					lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
 					continue
 				}
-				if response.StatusCode == http.StatusUnauthorized {
-					body, _ := readRetryableBody(response.Body)
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build OAuth credential rejected after refresh")
-					s.selector.MarkQuotaStateChanged(credential.Provider)
-					lease.Release()
-					lastErr = fmt.Errorf("upstream still returned 401 after refresh")
-					lastFailure = newHTTPUpstreamFailure(http.StatusUnauthorized, body, credential.ID, credential.Name)
-					continue
-				}
+				goto handleResponse
 			}
-			egressForbidden := s.providers.RetryForbiddenAsEgress(credential.Provider) && response.StatusCode == http.StatusForbidden
-			finalEgressForbidden := egressForbidden && (attempt > 0 || attempt+1 >= baseAttempts)
-			if isRetryableResponse(response, route.Provider) && !finalEgressForbidden {
-				retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-				body, _ := readRetryableBody(response.Body)
-				if egressForbidden {
-					// Web 403/code 7 表示出口浏览器会话被拒绝；Provider 已重建会话并降低节点健康，不应误伤账号。
-					delete(state.excluded, credential.ID)
-					lease.Release()
-					lastErr = fmt.Errorf("Grok Web egress session was rejected by anti-bot rules")
-					lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
-					continue
-				}
-				lastFailure = newHTTPUpstreamFailure(response.StatusCode, body, credential.ID, credential.Name)
-				// Adapter 仅允许 auto Super 在同请求内回退 XAI；非 Super 的 403 按账号级故障冷却换号。
-				freeBuildForbidden := response.StatusCode == http.StatusForbidden && credential.Provider == accountdomain.ProviderBuild && !accountdomain.IsBuildSuper(credential, lease.Billing)
-				if freeBuildForbidden {
-					lastFailure.AccountScoped = true
-				}
-				if response.StatusCode == http.StatusTooManyRequests && response.RateLimit != nil && response.RateLimit.TeamID != "" && response.RateLimit.Model == route.UpstreamModel {
-					limited := s.markTeamModelRateLimit(credential, route.UpstreamModel, *response.RateLimit, time.Now().UTC())
-					lastFailure.AccountScoped = false
-					lastFailure.Fingerprint = "429:team_model_rate_limit"
-					lastFailure.RetryAfter = time.Until(limited.Until)
-					lease.Release()
-					lastErr = fmt.Errorf("upstream team and model rate limited")
-					s.logger.Warn("upstream_team_model_rate_limited", "request_id", input.RequestID, "provider", credential.Provider, "model", route.UpstreamModel, "team_fingerprint", limited.TeamFingerprint, "scope", response.RateLimit.Scope, "actual", response.RateLimit.Actual, "limit", response.RateLimit.Limit, "retry_after", lastFailure.RetryAfter)
-					continue
-				}
-				if s.providers.SupportsCredentialRefresh(credential.Provider) && !state.authRecoveryAttempted[credential.ID] && credential.EncryptedRefreshToken != "" && (lastFailure.PermanentAccountDenial || lastFailure.CredentialRejected) {
-					state.authRecoveryAttempted[credential.ID] = true
-					refreshed, refreshErr := ensureCredential(credential, true)
-					if refreshErr != nil {
-						lease.Release()
-						lastErr = refreshErr
-						lastFailure = newCredentialUpstreamFailure(refreshErr, credential.ID, credential.Name)
-						continue
-					}
-					response, err = forwardResponse(refreshed, lease.Billing)
-					credential = refreshed
-					if err != nil {
-						lease.Release()
-						lastErr = err
-						if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-							lastFailure = &UpstreamFailure{HTTPStatus: 499, Code: "request_canceled", PublicMessage: "Request canceled", AccountID: credential.ID, AccountName: credential.Name, Cause: firstError(ctx.Err(), err)}
-							break attemptRound
-						}
-						lastFailure = newTransportUpstreamFailure(err, credential.ID, credential.Name)
-						continue
-					}
-					goto handleResponse
-				}
 				failureHandled := false
 				if freeBuildForbidden {
 					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
@@ -873,14 +924,10 @@ attemptRound:
 					})
 					failureHandled = true
 				}
-				if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
-					s.selector.MarkQuotaStateChanged(credential.Provider)
-					failureHandled = true
-				} else if credential.Provider == accountdomain.ProviderBuild && s.providers.SupportsCredentialRefresh(credential.Provider) && s.shouldInvalidateBuildForbidden(lastFailure) {
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, "Grok Build forbidden response matched configured reauth policy")
-					s.selector.MarkQuotaStateChanged(credential.Provider)
-					failureHandled = true
+				if lastFailure.AccountBlocked {
+					failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s account is blocked", credential.Provider))
+				} else if buildForbiddenReauth {
+					failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s upstream error code %s matched the invalidation policy", credential.Provider, lastFailure.UpstreamCode))
 				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
 					if credential.Provider == accountdomain.ProviderBuild {
 						s.selector.MarkModelAccessDenied(ctx, credential, route.UpstreamModel, retryAfter)
@@ -888,6 +935,10 @@ attemptRound:
 						_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
 						s.selector.MarkQuotaStateChanged(credential.Provider)
 					}
+					failureHandled = true
+				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
+					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
+					s.selector.MarkQuotaStateChanged(credential.Provider)
 					failureHandled = true
 				}
 				if lastFailure.AccountScoped && !failureHandled {

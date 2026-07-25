@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode"
 
-	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 )
 
@@ -150,16 +150,6 @@ func newTransportUpstreamFailure(err error, accountID uint64, accountName string
 	return &UpstreamFailure{HTTPStatus: status, Code: code, PublicMessage: message, AccountID: accountID, AccountName: accountName, Fingerprint: code, Cause: err}
 }
 
-func isRetryableTransportFailure(providerValue accountdomain.Provider, err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) {
-		return false
-	}
-	if neterrorpkg.IsResponseHeaderTimeout(err) {
-		return providerValue != accountdomain.ProviderBuild
-	}
-	return true
-}
-
 func newCredentialUpstreamFailure(err error, accountID uint64, accountName string) *UpstreamFailure {
 	return &UpstreamFailure{
 		HTTPStatus: http.StatusBadGateway, Code: "upstream_credential_unavailable", PublicMessage: "Upstream account credentials are unavailable",
@@ -194,7 +184,7 @@ func isAccountScopedForbidden(text string) bool {
 }
 
 func isDefinitiveAccountBlock(text string) bool {
-	return containsAny(text, "blocked-user", "user is blocked")
+	return provider.IsDefinitiveAccountBlockText(text)
 }
 
 func isPermanentAccountDenial(text string) bool {
