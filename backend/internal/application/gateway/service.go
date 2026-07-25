@@ -608,6 +608,7 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		adapter, ok := s.providers.Responses(route.Provider)
 		if !ok {
 			continue
+
 		}
 		supportsStoredResponses := s.providers.SupportsStoredResponses(route.Provider)
 		if input.PreviousResponseID != "" && !supportsStoredResponses {
@@ -700,9 +701,9 @@ attemptRound:
 			var err error
 			selectionStarted := time.Now()
 			if ownership != nil {
-				lease, err = s.selector.AcquirePinned(ctx, route.Provider, ownership.AccountID, route.UpstreamModel, quotaMode, true)
+				lease, err = s.selector.AcquirePinned(ctx, route.Provider, ownership.AccountID, route.ID, route.UpstreamModel, quotaMode, true)
 			} else {
-				lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, affinityKey, state.excluded, !state.quotaProbeAttempted)
+				lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, affinityKey, state.excluded, !state.quotaProbeAttempted)
 			}
 			timing.markSelection(time.Since(selectionStarted))
 			if err != nil {
@@ -897,51 +898,49 @@ attemptRound:
 				}
 				goto handleResponse
 			}
-				failureHandled := false
-				if freeBuildForbidden {
-					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
-					failureHandled = true
-				} else if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
-					exhausted, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+			failureHandled := false
+			if freeBuildForbidden {
+				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
+				failureHandled = true
+			} else if lease.QuotaMode != "" && response.StatusCode == http.StatusTooManyRequests {
+				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+				s.selector.MarkQuotaStateChanged(credential.Provider)
+				failureHandled = reconcileErr == nil && exhausted
+			} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
+				s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit)
+				failureHandled = true
+			} else if lastFailure.ModelQuotaExhausted {
+				s.selector.MarkModelQuotaExhausted(ctx, credential, lease.Billing, route.UpstreamModel, retryAfter)
+				failureHandled = true
+			} else if lastFailure.FreeQuotaExhausted {
+				s.selector.MarkFreeQuotaExhausted(ctx, credential, 0, 0)
+				failureHandled = true
+			} else if lastFailure.QuotaExhausted {
+				s.selector.MarkPaymentQuotaExhausted(ctx, credential, quotaRecoveryHints{
+					Billing: lease.Billing,
+				})
+				failureHandled = true
+			}
+			if lastFailure.AccountBlocked {
+				failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s account is blocked", credential.Provider))
+			} else if buildForbiddenReauth {
+				failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s upstream error code %s matched the invalidation policy", credential.Provider, lastFailure.UpstreamCode))
+			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
+				if credential.Provider == accountdomain.ProviderBuild {
+					// A Build account may lack permission for one chat model while its OAuth credential and video
+					// access remain valid. Isolate this denial to the model; reauthorization is needed only when the credential is rejected.
+					s.selector.MarkModelAccessDenied(ctx, credential, route.UpstreamModel, retryAfter)
+				} else {
+					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
 					s.selector.MarkQuotaStateChanged(credential.Provider)
-					failureHandled = reconcileErr == nil && exhausted
-				} else if used, limit, exhausted := parseFreeQuotaExhaustion(body); exhausted {
-					s.selector.MarkFreeQuotaExhausted(ctx, credential, used, limit, quotaRecoveryHints{
-						Billing: lease.Billing, QuotaMode: lease.QuotaMode, RetryAfter: retryAfter,
-					})
-					failureHandled = true
-				} else if lastFailure.ModelQuotaExhausted {
-					s.selector.MarkModelQuotaExhausted(ctx, credential, route.UpstreamModel, retryAfter)
-					failureHandled = true
-				} else if lastFailure.FreeQuotaExhausted {
-					s.selector.MarkFreeQuotaExhausted(ctx, credential, 0, 0, quotaRecoveryHints{
-						Billing: lease.Billing, QuotaMode: lease.QuotaMode, RetryAfter: retryAfter,
-					})
-					failureHandled = true
-				} else if lastFailure.QuotaExhausted {
-					s.selector.MarkPaymentQuotaExhausted(ctx, credential, quotaRecoveryHints{
-						Billing: lease.Billing, QuotaMode: lease.QuotaMode, RetryAfter: retryAfter,
-					})
-					failureHandled = true
 				}
-				if lastFailure.AccountBlocked {
-					failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s account is blocked", credential.Provider))
-				} else if buildForbiddenReauth {
-					failureHandled = s.markReauthRequired(ctx, input.RequestID, credential, fmt.Sprintf("%s upstream error code %s matched the invalidation policy", credential.Provider, lastFailure.UpstreamCode))
-				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.PermanentAccountDenial {
-					if credential.Provider == accountdomain.ProviderBuild {
-						s.selector.MarkModelAccessDenied(ctx, credential, route.UpstreamModel, retryAfter)
-					} else {
-						_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s chat endpoint access denied", credential.Provider))
-						s.selector.MarkQuotaStateChanged(credential.Provider)
-					}
-					failureHandled = true
-				} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
-					_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
-					s.selector.MarkQuotaStateChanged(credential.Provider)
-					failureHandled = true
-				}
-				if lastFailure.AccountScoped && !failureHandled {
+				failureHandled = true
+			} else if s.providers.SupportsCredentialRefresh(credential.Provider) && lastFailure.CredentialRejected {
+				_ = s.accounts.MarkReauthRequired(ctx, credential.ID, fmt.Sprintf("%s credential rejected", credential.Provider))
+				s.selector.MarkQuotaStateChanged(credential.Provider)
+				failureHandled = true
+			}
+			if lastFailure.AccountScoped && !failureHandled {
 					s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 				}
 				lease.Release()
@@ -1238,7 +1237,13 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	if !ok {
 		return nil, ErrResponseAccountUnavailable
 	}
-	lease, err := s.selector.AcquirePinned(ctx, ownership.Provider, ownership.AccountID, "", "", false)
+	operation := "response_get"
+	if method == http.MethodDelete {
+		operation = "response_delete"
+	}
+	physicalCallCtx := infraegress.WithPhysicalCallTrace(ctx, string(ownership.Provider), operation)
+	lease, err := s.selector.AcquirePinned(ctx, ownership.Provider, ownership.AccountID, 0, "", "", false)
+
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrResponseAccountUnavailable, err)
 	}
@@ -1251,7 +1256,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 	if input.RawQuery != "" {
 		path += "?" + input.RawQuery
 	}
-	response, err := adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: credential, Method: method, Path: path})
+	response, err := adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: credential, Method: method, Path: path})
 	if err != nil {
 		if isSSOCredentialRejected(err, credential) {
 			s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
@@ -1278,7 +1283,7 @@ func (s *Service) forwardOwnedResponse(ctx context.Context, input ResourceInput,
 			lease.Release()
 			return nil, refreshErr
 		}
-		response, err = adapter.ForwardResponse(ctx, provider.ResponseResourceRequest{Credential: refreshed, Method: method, Path: path})
+		response, err = adapter.ForwardResponse(physicalCallCtx, provider.ResponseResourceRequest{Credential: refreshed, Method: method, Path: path})
 		credential = refreshed
 		if err != nil {
 			lease.Release()

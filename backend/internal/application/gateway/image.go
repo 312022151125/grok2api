@@ -208,7 +208,7 @@ attemptRound:
 			pricingModel = s.providers.PricingModel(route.Provider, route.UpstreamModel)
 			quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 			// One account per route per retry round.
-			lease, err = s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", state.excluded, false)
+			lease, err = s.selector.Acquire(ctx, route.Provider, route.ID, route.UpstreamModel, quotaMode, "", state.excluded, false)
 			if err != nil {
 				lastCredentialError = firstError(lastCredentialError, err)
 				state.exhausted = true
@@ -225,6 +225,7 @@ attemptRound:
 				lease.Release()
 				continue
 			}
+			lease.markSelectorUpstreamStarted()
 			response, err = execute(ctx, route.Provider, credential, route.UpstreamModel)
 			if err != nil {
 				s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
@@ -249,6 +250,7 @@ attemptRound:
 			}
 			if response.StatusCode == http.StatusUnauthorized && credential.AuthType == accountdomain.AuthTypeSSO {
 				_, _ = readRetryableBody(response.Body)
+
 				s.markSSOCredentialRejected(ctx, credential, fmt.Sprintf("%s SSO credential rejected", credential.Provider))
 				failedCredential := credential
 				lastCredentialFailure = &failedCredential
