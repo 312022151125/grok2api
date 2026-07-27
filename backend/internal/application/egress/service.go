@@ -19,6 +19,7 @@ var (
 	ErrInvalidInput         = errors.New("Invalid egress node parameters")
 	ErrInvalidSort          = errors.New("Invalid egress node sort")
 	ErrNotFound             = errors.New("Egress node not found")
+	ErrProbeStale           = errors.New("Egress configuration changed during probing, please retest")
 	ErrClearanceUnavailable = errors.New("Clearance refresh is unavailable")
 )
 
@@ -183,7 +184,7 @@ func (s *Service) validateFallbackNodeUpdate(ctx context.Context, node domain.No
 			continue
 		}
 		if err := s.validateFixedFallbackNode(scope, node, false); err != nil {
-			return fmt.Errorf("节点已配置为 %s 固定回退，无法应用当前修改: %w", scope, err)
+			return fmt.Errorf("node is configured as %s fixed fallback, cannot apply current change: %w", scope, err)
 		}
 	}
 	return nil
@@ -207,7 +208,7 @@ func (s *Service) Delete(ctx context.Context, id uint64) error {
 func (s *Service) DeleteMany(ctx context.Context, nodeIDs []uint64) (int, error) {
 	ids := uniqueIDs(nodeIDs)
 	if len(ids) == 0 {
-		return 0, fmt.Errorf("%w: 代理节点参数无效", ErrInvalidInput)
+		return 0, fmt.Errorf("%w: invalid egress node parameters", ErrInvalidInput)
 	}
 	if batch, ok := s.repository.(BatchNodeDeleter); ok {
 		deleted, err := batch.DeleteEgressNodes(ctx, ids)
@@ -253,10 +254,10 @@ func (s *Service) RefreshClearance(ctx context.Context, id uint64) error {
 // not a proxy-pool preference: runtime requests must use the selected node.
 func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider accountdomain.Provider, accountIDs []uint64, mode accountdomain.EgressAssignmentMode) (AssignmentResult, error) {
 	if s.accounts == nil {
-		return AssignmentResult{}, errors.New("账号出口绑定不可用")
+		return AssignmentResult{}, errors.New("account egress binding unavailable")
 	}
 	if nodeID == 0 || !provider.IsValid() || !mode.IsValid() || len(accountIDs) == 0 {
-		return AssignmentResult{}, fmt.Errorf("%w: 账号出口绑定参数无效", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: invalid account egress binding parameters", ErrInvalidInput)
 	}
 	node, err := s.repository.GetEgressNode(ctx, nodeID)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -266,10 +267,10 @@ func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider ac
 		return AssignmentResult{}, err
 	}
 	if !node.Enabled || strings.TrimSpace(node.EncryptedProxyURL) == "" {
-		return AssignmentResult{}, fmt.Errorf("%w: 只能绑定启用且已配置代理地址的节点", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: can only bind enabled nodes with a configured proxy URL", ErrInvalidInput)
 	}
 	if !scopeSupportsProvider(node.Scope, provider) {
-		return AssignmentResult{}, fmt.Errorf("%w: 代理节点作用域与账号来源不兼容", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: egress node scope is incompatible with account source", ErrInvalidInput)
 	}
 	unique := uniqueIDs(accountIDs)
 	count, err := s.accounts.CountProviderAccountsByIDs(ctx, provider, unique)
@@ -277,7 +278,7 @@ func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider ac
 		return AssignmentResult{}, err
 	}
 	if count != int64(len(unique)) {
-		return AssignmentResult{}, fmt.Errorf("%w: 包含不属于当前账号池的账号", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: contains accounts not in the current account pool", ErrInvalidInput)
 	}
 	assigned, err := s.accounts.UpdateEgressBindings(ctx, provider, unique, &nodeID, mode, time.Now().UTC())
 	if err != nil {
@@ -289,10 +290,10 @@ func (s *Service) AssignAccounts(ctx context.Context, nodeID uint64, provider ac
 // UnassignAccounts removes an explicit binding and restores scope pool routing.
 func (s *Service) UnassignAccounts(ctx context.Context, provider accountdomain.Provider, accountIDs []uint64) (AssignmentResult, error) {
 	if s.accounts == nil {
-		return AssignmentResult{}, errors.New("账号出口绑定不可用")
+		return AssignmentResult{}, errors.New("account egress binding unavailable")
 	}
 	if !provider.IsValid() || len(accountIDs) == 0 {
-		return AssignmentResult{}, fmt.Errorf("%w: 账号出口解绑参数无效", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: invalid account egress unbinding parameters", ErrInvalidInput)
 	}
 	unique := uniqueIDs(accountIDs)
 	count, err := s.accounts.CountProviderAccountsByIDs(ctx, provider, unique)
@@ -300,7 +301,7 @@ func (s *Service) UnassignAccounts(ctx context.Context, provider accountdomain.P
 		return AssignmentResult{}, err
 	}
 	if count != int64(len(unique)) {
-		return AssignmentResult{}, fmt.Errorf("%w: 包含不属于当前账号池的账号", ErrInvalidInput)
+		return AssignmentResult{}, fmt.Errorf("%w: contains accounts not in the current account pool", ErrInvalidInput)
 	}
 	updated, err := s.accounts.UpdateEgressBindings(ctx, provider, unique, nil, "", time.Time{})
 	if err != nil {
@@ -347,7 +348,7 @@ func (s *Service) validateSourceBindingScope(ctx context.Context, sourceID uint6
 func validateBindingProviders(scope domain.Scope, providers []accountdomain.Provider) error {
 	for _, provider := range providers {
 		if !scopeSupportsProvider(scope, provider) {
-			return fmt.Errorf("%w: 当前节点仍绑定 %s 账号，不能改为 %s 作用域", ErrInvalidInput, provider, scope)
+			return fmt.Errorf("%w: node still bound to %s accounts, cannot change scope to %s", ErrInvalidInput, provider, scope)
 		}
 	}
 	return nil
@@ -394,12 +395,12 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 	value.Name, value.Scope, value.Enabled, value.ProxyPool = name, input.Scope, input.Enabled, proxyPool
 	if input.AccountCapacity != nil {
 		if *input.AccountCapacity < 0 || *input.AccountCapacity > 100000 {
-			return domain.Node{}, fmt.Errorf("%w: 每个代理的账号容量必须在 0 到 100000 之间", ErrInvalidInput)
+			return domain.Node{}, fmt.Errorf("%w: account capacity per proxy must be between 0 and 100000", ErrInvalidInput)
 		}
 		value.AccountCapacity = *input.AccountCapacity
 	}
 	if input.Scope == domain.ScopeBuild {
-		// Build 请求始终沿用 Provider 生成的 CLI User-Agent，出口节点不得覆盖协议身份。
+		// Build requests always use the Provider-generated CLI User-Agent; egress nodes must not override protocol identity.
 		value.UserAgent = ""
 	} else {
 		value.UserAgent = strings.TrimSpace(input.UserAgent)
@@ -428,7 +429,7 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		}
 	}
 	if value.ProxyPool && strings.TrimSpace(value.EncryptedProxyURL) == "" {
-		return domain.Node{}, fmt.Errorf("%w: 代理池模式需要配置代理地址", ErrInvalidInput)
+		return domain.Node{}, fmt.Errorf("%w: proxy pool mode requires a configured proxy URL", ErrInvalidInput)
 	}
 	if input.Scope == domain.ScopeBuild {
 		value.EncryptedCloudflareCookie = ""
@@ -457,6 +458,9 @@ func (s *Service) applyInput(value domain.Node, input Input, create bool) (domai
 		value.ProbeLatencyMS = 0
 		value.ExitIP = ""
 		value.ProbeError = ""
+		value.ProbeProvider = ""
+		value.IPv4Probe = domain.ProbeFamilyResult{Status: domain.ProbeStatusUnknown}
+		value.IPv6Probe = domain.ProbeFamilyResult{Status: domain.ProbeStatusUnknown}
 	}
 	// Any administrator edit invalidates freshness. Keep the binding fingerprint:
 	// managed mode may use the existing cookie as last-known-good only when the
@@ -486,6 +490,8 @@ func (s *Service) publicNode(value domain.Node) domain.PublicNode {
 		AccountBoundProxy: accountBoundProxy,
 		Health:            health, FailureCount: failureCount, CooldownUntil: cooldownUntil, LastError: lastError,
 		ProbeStatus: value.ProbeStatus, LastProbedAt: value.LastProbedAt, ProbeLatencyMS: value.ProbeLatencyMS, ExitIP: value.ExitIP, ProbeError: value.ProbeError,
+		ProbeProvider: value.ProbeProvider,
+		IPv4Probe:     value.IPv4Probe, IPv6Probe: value.IPv6Probe,
 		AssignedAccountCount: value.AssignedAccountCount,
 		CreatedAt:            value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
