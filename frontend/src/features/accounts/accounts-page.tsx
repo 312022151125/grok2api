@@ -43,9 +43,10 @@ import {
   previewCleanup,
   enableWebAccountNSFW,
   convertWebAccountsToBuild,
-  exportAccounts,
-  exportWebAccounts,
+  exportAccountBatch,
+  exportSelectedAccounts,
   exportCLIProxyAccounts,
+  exportWebAccounts,
   getAccountSummary,
   importAccounts,
   importConsoleAccounts,
@@ -69,6 +70,7 @@ import {
   syncWebAccountsToConsole,
   updateAccount,
   updateAccountsEnabled,
+  updateAccountsMaxConcurrent,
   type AccountDTO,
   type AccountCleanupStatus,
   type AccountProvider,
@@ -88,7 +90,7 @@ import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/accoun
 import { AccountNameCell } from "@/features/accounts/account-name-cell";
 import { WebAccountScriptsDialog } from "@/features/accounts/web-account-scripts";
 import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "@/features/accounts/web-account-settings";
-import { assignEgressAccounts, listEgressNodes, unassignEgressAccounts, type EgressScope } from "@/features/settings/settings-api";
+import { assignEgressAccounts, listAllEgressNodes, unassignEgressAccounts, type EgressScope } from "@/features/settings/settings-api";
 
 function isAbortError(error: unknown): boolean {
   return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
@@ -134,6 +136,8 @@ export function AccountsPage() {
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
   const [selection, setSelection] = useState<AccountSelection>(() => ({ provider: "grok_build", ids: new Set() }));
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchConcurrencyOpen, setBatchConcurrencyOpen] = useState(false);
+  const [batchMaxConcurrent, setBatchMaxConcurrent] = useState("1");
   const [batchQuotaTaskOpen, setBatchQuotaTaskOpen] = useState(false);
   const [batchQuotaTask, setBatchQuotaTask] = useState<BuildQuotaTask>("sync");
   const [egressConfigurationOpen, setEgressConfigurationOpen] = useState(false);
@@ -150,6 +154,11 @@ export function AccountsPage() {
   const [exportOpen, setExportOpen] = useState(false);
   const [exportCLIProxyOpen, setExportCLIProxyOpen] = useState(false);
   const [exportWebOpen, setExportWebOpen] = useState(false);
+  const [exportLimit, setExportLimit] = useState("1000");
+  const [exportCursor, setExportCursor] = useState("0");
+  const [exportSnapshotMaxId, setExportSnapshotMaxId] = useState("0");
+  const [exportBatchNumber, setExportBatchNumber] = useState(1);
+  const [exportCompletedCount, setExportCompletedCount] = useState(0);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
   const [allQuotaTask, setAllQuotaTask] = useState<BuildQuotaTask>("sync");
   const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
@@ -230,7 +239,7 @@ export function AccountsPage() {
   });
   const egressNodesQuery = useQuery({
     queryKey: ["egress-nodes", "account-binding"],
-    queryFn: () => listEgressNodes(),
+    queryFn: () => listAllEgressNodes(),
     enabled: egressConfigurationOpen && egressConfigurationTask === "bind",
   });
 
@@ -491,7 +500,7 @@ export function AccountsPage() {
     mutationFn: resetAllAccountQuota,
     onSuccess: (result) => {
       setSyncAllOpen(false);
-      toast.success(t("accountQuotaReset.completed", result));
+      toast.success(t("accounts.accountQuotaReset.completed", result));
     },
     onError: showError,
     onSettled: invalidateAccountData,
@@ -604,11 +613,31 @@ export function AccountsPage() {
   });
 
   const exportMutation = useMutation({
-    mutationFn: () => exportAccounts(provider),
-    onSuccess: (blob) => {
-      downloadAccountExport(blob, provider);
+    mutationFn: async (input: { kind: "selected"; ids: string[] } | { kind: "batch"; limit: number; afterId: string; snapshotMaxId: string; batchNumber: number }) => {
+      if (input.kind === "selected") {
+        return { kind: input.kind, blob: await exportSelectedAccounts(provider, input.ids) } as const;
+      }
+      return { kind: input.kind, batchNumber: input.batchNumber, batch: await exportAccountBatch(provider, input.limit, input.afterId, input.snapshotMaxId) } as const;
+    },
+    onSuccess: (result) => {
+      if (result.kind === "selected") {
+        downloadAccountExport(result.blob, provider, "selected");
+        setExportOpen(false);
+        toast.success(t("accounts.exported"));
+        return;
+      }
+      downloadAccountExport(result.batch.blob, provider, `batch-${String(result.batchNumber).padStart(4, "0")}`);
+      const completed = exportCompletedCount + result.batch.count;
+      if (result.batch.hasMore) {
+        setExportCursor(result.batch.nextId);
+        setExportSnapshotMaxId(result.batch.snapshotMaxId);
+        setExportBatchNumber(result.batchNumber + 1);
+        setExportCompletedCount(completed);
+        toast.success(t("accounts.accountExport.batchCompleted", { count: result.batch.count }));
+        return;
+      }
       setExportOpen(false);
-      toast.success(t("accounts.exported"));
+      toast.success(t("accounts.accountExport.completed", { count: completed }));
     },
     onError: showError,
   });
@@ -643,6 +672,17 @@ export function AccountsPage() {
     onError: showError,
   });
 
+  const batchConcurrencyMutation = useMutation({
+    mutationFn: (maxConcurrent: number) => updateAccountsMaxConcurrent([...selected], maxConcurrent, provider),
+    onSuccess: () => {
+      setBatchConcurrencyOpen(false);
+      clearSelection();
+      invalidateAccountData();
+      toast.success(t("accounts.batchConcurrencyUpdated"));
+    },
+    onError: showError,
+  });
+
   const batchBillingMutation = useMutation({
     mutationFn: () => refreshAccountsQuota([...selected], provider),
     onSuccess: (result) => {
@@ -660,7 +700,7 @@ export function AccountsPage() {
       clearSelection();
       setBatchQuotaTaskOpen(false);
       invalidateAccountData();
-      toast.success(t("accountQuotaReset.completed", result));
+      toast.success(t("accounts.accountQuotaReset.completed", result));
     },
     onError: showError,
   });
@@ -958,6 +998,24 @@ export function AccountsPage() {
     setSelection((current) => ({ provider: current.provider, ids: new Set() }));
   }
 
+  function resetExportProgress(): void {
+    setExportCursor("0");
+    setExportSnapshotMaxId("0");
+    setExportBatchNumber(1);
+    setExportCompletedCount(0);
+  }
+
+  function openProviderExport(): void {
+    clearSelection();
+    resetExportProgress();
+    setExportOpen(true);
+  }
+
+  function openSelectedExport(): void {
+    resetExportProgress();
+    setExportOpen(true);
+  }
+
   function togglePage(checked: boolean): void {
     setSelection((current) => {
       const next = new Set(current.provider === provider ? current.ids : []);
@@ -1004,6 +1062,7 @@ export function AccountsPage() {
     || webConsoleSyncMutation.isPending
     || importMutation.isPending
     || batchUpdateMutation.isPending
+    || batchConcurrencyMutation.isPending
     || batchBillingMutation.isPending
     || batchQuotaResetMutation.isPending
     || batchTokenMutation.isPending
@@ -1065,7 +1124,7 @@ export function AccountsPage() {
               {hasProviderAccounts ? (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => setExportOpen(true)}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
+                  <DropdownMenuItem onClick={openProviderExport}><Download />{t("accounts.exportAuth")}</DropdownMenuItem>
                 </>
               ) : null}
             </DropdownMenuContent>
@@ -1149,8 +1208,13 @@ export function AccountsPage() {
             {selected.size > 0 ? (
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="mr-1 text-xs text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</span>
+                <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={openSelectedExport}><Download />{t("accounts.exportAuth")}</Button>
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchUpdateMutation.mutate(true)}>{t("common.enable")}</Button>
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => batchUpdateMutation.mutate(false)}>{t("common.disable")}</Button>
+                <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
+                  setBatchMaxConcurrent("1");
+                  setBatchConcurrencyOpen(true);
+                }}>{t("accounts.batchSetConcurrency")}</Button>
                 <Button variant="secondary" size="sm" disabled={bulkTaskPending} onClick={() => {
                   setEgressNodeID("");
                   setEgressConfigurationTask("bind");
@@ -1287,18 +1351,18 @@ export function AccountsPage() {
       }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t(provider === "grok_build" ? "accountQuotaTask.allTitle" : "accounts.syncAllTitle")}</AlertDialogTitle>
-            <AlertDialogDescription>{t(provider === "grok_build" ? "accountQuotaTask.allDescription" : provider === "grok_web" ? "accounts.syncAllWebDescription" : "console.syncAllDescription")}</AlertDialogDescription>
+            <AlertDialogTitle>{t(provider === "grok_build" ? "accounts.accountQuotaTask.allTitle" : "accounts.syncAllTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>{t(provider === "grok_build" ? "accounts.accountQuotaTask.allDescription" : provider === "grok_web" ? "accounts.syncAllWebDescription" : "console.syncAllDescription")}</AlertDialogDescription>
           </AlertDialogHeader>
           {provider === "grok_build" ? (
             <div className="space-y-3">
               <Tabs value={allQuotaTask} onValueChange={(value) => setAllQuotaTask(value as BuildQuotaTask)}>
                 <TabsList className="grid h-10 w-full grid-cols-2 p-1">
                   <TabsTrigger value="sync" className="h-8 font-normal" disabled={quotaSyncMutation.isPending || allQuotaResetMutation.isPending}>{t("accounts.refreshBilling")}</TabsTrigger>
-                  <TabsTrigger value="reset" className="h-8 font-normal" disabled={quotaSyncMutation.isPending || allQuotaResetMutation.isPending}>{t("accountQuotaReset.action")}</TabsTrigger>
+                  <TabsTrigger value="reset" className="h-8 font-normal" disabled={quotaSyncMutation.isPending || allQuotaResetMutation.isPending}>{t("accounts.accountQuotaReset.action")}</TabsTrigger>
                 </TabsList>
               </Tabs>
-              <p className="min-h-10 text-xs leading-5 text-muted-foreground">{t(allQuotaTask === "sync" ? "accounts.syncAllDescription" : "accountQuotaTask.resetAllDescription")}</p>
+              <p className="min-h-10 text-xs leading-5 text-muted-foreground">{t(allQuotaTask === "sync" ? "accounts.syncAllDescription" : "accounts.accountQuotaTask.resetAllDescription")}</p>
             </div>
           ) : null}
           <AlertDialogFooter>
@@ -1308,7 +1372,7 @@ export function AccountsPage() {
               if (provider === "grok_build" && allQuotaTask === "reset") allQuotaResetMutation.mutate();
               else quotaSyncMutation.mutate(provider);
             }}>
-              {quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : allQuotaResetMutation.isPending ? <Spinner /> : t(provider === "grok_build" ? "accountQuotaTask.execute" : "accounts.syncAll")}
+              {quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : allQuotaResetMutation.isPending ? <Spinner /> : t(provider === "grok_build" ? "accounts.accountQuotaTask.execute" : "accounts.syncAll")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1357,10 +1421,32 @@ export function AccountsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <AlertDialog open={exportOpen} onOpenChange={setExportOpen}>
+      <AlertDialog open={exportOpen} onOpenChange={(open) => { if (!open && !exportMutation.isPending) setExportOpen(false); }}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.exportTitle", { provider: provider === "grok_build" ? "Grok Build" : provider === "grok_web" ? "Grok Web" : "Grok Console" })}</AlertDialogTitle><AlertDialogDescription>{t("accounts.exportDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={exportMutation.isPending} onClick={() => exportMutation.mutate()}>{t("accounts.exportAuth")}</AlertDialogAction></AlertDialogFooter>
+          {selected.size > 0 ? <p className="text-sm text-muted-foreground">{t("common.selectedCount", { count: selected.size })}</p> : <div className="grid gap-2">
+            <Label htmlFor="account-export-limit">{t("accounts.exportCount")}</Label>
+            <Input id="account-export-limit" type="number" min={1} max={10000} value={exportLimit} disabled={exportSnapshotMaxId !== "0"} onChange={(event) => setExportLimit(event.target.value)} />
+            <p className="text-xs text-muted-foreground">{t("accounts.accountExport.countDescription")}</p>
+            {exportCompletedCount > 0 ? <p className="text-sm text-muted-foreground">{t("accounts.accountExport.batchProgress", { count: exportCompletedCount, batch: exportBatchNumber })}</p> : null}
+          </div>}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={exportMutation.isPending}>{t("common.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={exportMutation.isPending || (selected.size === 0 && (!Number.isInteger(Number(exportLimit)) || Number(exportLimit) < 1 || Number(exportLimit) > 10000))}
+              onClick={(event) => {
+                event.preventDefault();
+                if (selected.size > 0) {
+                  exportMutation.mutate({ kind: "selected", ids: [...selected] });
+                  return;
+                }
+                exportMutation.mutate({ kind: "batch", limit: Number(exportLimit), afterId: exportCursor, snapshotMaxId: exportSnapshotMaxId, batchNumber: exportBatchNumber });
+              }}
+            >
+              {exportMutation.isPending ? <Spinner /> : null}
+              {selected.size === 0 && exportCompletedCount > 0 ? t("accounts.accountExport.nextBatch") : t("accounts.exportAuth")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
@@ -1584,6 +1670,42 @@ export function AccountsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      <Dialog open={batchConcurrencyOpen} onOpenChange={(open) => {
+        if (!open && batchConcurrencyMutation.isPending) return;
+        setBatchConcurrencyOpen(open);
+      }}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>{t("accounts.batchConcurrencyTitle", { count: selected.size })}</DialogTitle>
+            <DialogDescription>{t("accounts.batchConcurrencyDescription")}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="batch-account-concurrency">{t("accounts.maxConcurrent")}</Label>
+            <Input
+              id="batch-account-concurrency"
+              type="number"
+              min="1"
+              max="256"
+              value={batchMaxConcurrent}
+              disabled={batchConcurrencyMutation.isPending}
+              onChange={(event) => setBatchMaxConcurrent(event.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="secondary" size="sm" disabled={batchConcurrencyMutation.isPending} onClick={() => setBatchConcurrencyOpen(false)}>{t("common.cancel")}</Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={batchConcurrencyMutation.isPending || !Number.isInteger(Number(batchMaxConcurrent)) || Number(batchMaxConcurrent) < 1 || Number(batchMaxConcurrent) > 256}
+              onClick={() => batchConcurrencyMutation.mutate(Number(batchMaxConcurrent))}
+            >
+              {batchConcurrencyMutation.isPending ? <Spinner /> : null}
+              {t("common.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={batchDeleteOpen} onOpenChange={(open) => {
         if (!open && batchDeleteMutation.isPending) return;
         setBatchDeleteOpen(open);
@@ -1646,17 +1768,17 @@ export function AccountsPage() {
       }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{t("accountQuotaTask.title", { count: selected.size })}</AlertDialogTitle>
-            <AlertDialogDescription>{t("accountQuotaTask.description")}</AlertDialogDescription>
+            <AlertDialogTitle>{t("accounts.accountQuotaTask.title", { count: selected.size })}</AlertDialogTitle>
+            <AlertDialogDescription>{t("accounts.accountQuotaTask.description")}</AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-3">
             <Tabs value={batchQuotaTask} onValueChange={(value) => setBatchQuotaTask(value as BuildQuotaTask)}>
               <TabsList className="grid h-10 w-full grid-cols-2 p-1">
                 <TabsTrigger value="sync" className="h-8 font-normal" disabled={batchBillingMutation.isPending || batchQuotaResetMutation.isPending}>{t("accounts.refreshBilling")}</TabsTrigger>
-                <TabsTrigger value="reset" className="h-8 font-normal" disabled={batchBillingMutation.isPending || batchQuotaResetMutation.isPending}>{t("accountQuotaReset.action")}</TabsTrigger>
+                <TabsTrigger value="reset" className="h-8 font-normal" disabled={batchBillingMutation.isPending || batchQuotaResetMutation.isPending}>{t("accounts.accountQuotaReset.action")}</TabsTrigger>
               </TabsList>
             </Tabs>
-            <p className="min-h-10 text-xs leading-5 text-muted-foreground">{t(batchQuotaTask === "sync" ? "accountQuotaTask.syncDescription" : "accountQuotaReset.description")}</p>
+            <p className="min-h-10 text-xs leading-5 text-muted-foreground">{t(batchQuotaTask === "sync" ? "accounts.accountQuotaTask.syncDescription" : "accounts.accountQuotaReset.description")}</p>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
@@ -1666,7 +1788,7 @@ export function AccountsPage() {
               else batchBillingMutation.mutate();
             }}>
               {batchBillingMutation.isPending || batchQuotaResetMutation.isPending ? <Spinner /> : null}
-              {t("accountQuotaTask.execute")}
+              {t("accounts.accountQuotaTask.execute")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1728,7 +1850,7 @@ export function AccountsPage() {
               }}
             >
               {bindEgressMutation.isPending || unbindEgressMutation.isPending ? <Spinner /> : null}
-              {t("accountQuotaTask.execute")}
+              {t("accounts.accountQuotaTask.execute")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1870,9 +1992,15 @@ function downloadBlob(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-function downloadAccountExport(blob: Blob, provider: AccountProvider): void {
-  downloadBlob(blob, `grok2api-${provider.replaceAll("_", "-")}-accounts-${new Date().toISOString().slice(0, 10)}.json`);
+function downloadAccountExport(blob: Blob, provider: AccountProvider, suffix: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `grok2api-${provider.replaceAll("_", "-")}-accounts-${suffix}-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+
 function scopeSupportsAccountProvider(scope: EgressScope, provider: AccountProvider): boolean {
   if (provider === "grok_build") return scope === "grok_build";
   if (provider === "grok_web") return scope === "grok_web";
@@ -1922,7 +2050,21 @@ function AccountStatus({ account }: { account: AccountDTO }) {
     return <Badge variant="outline" className="text-muted-foreground">{t("accounts.statusDisabled")}</Badge>;
   }
   if (account.authStatus === "reauthRequired") {
-    return <Badge variant="destructive">{t("accounts.statusReauthRequired")}</Badge>;
+    const refreshErrorDetails = formatAdditionalRefreshErrorDetails(account);
+    const hasRefreshError = Boolean(account.lastRefreshErrorStatus || account.lastRefreshErrorCode || account.lastRefreshErrorMessage || refreshErrorDetails);
+    if (!hasRefreshError) return <Badge variant="destructive">{t("accounts.statusReauthRequired")}</Badge>;
+    return (
+      <StatusTooltip content={(
+        <div className="grid w-72 max-w-[calc(100vw-2rem)] grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs font-normal leading-5">
+          {account.lastRefreshErrorStatus ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorStatus")}</span><span>{account.lastRefreshErrorStatus}</span></> : null}
+          {account.lastRefreshErrorCode ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorCode")}</span><span className="break-all">{account.lastRefreshErrorCode}</span></> : null}
+          {account.lastRefreshErrorMessage ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorMessage")}</span><span className="break-words">{account.lastRefreshErrorMessage}</span></> : null}
+          {refreshErrorDetails ? <><span className="text-primary-foreground/60">{t("accounts.refreshErrorResponse")}</span><span className="max-h-40 overflow-auto whitespace-pre-wrap break-all">{refreshErrorDetails}</span></> : null}
+        </div>
+      )}>
+        <Badge variant="destructive">{t("accounts.statusReauthRequired")}</Badge>
+      </StatusTooltip>
+    );
   }
   const consoleWindow = account.provider === "grok_console"
     ? account.quotaWindows?.find((window) => window.mode === "console" && window.remaining <= 0)
@@ -1960,13 +2102,41 @@ function AccountStatus({ account }: { account: AccountDTO }) {
   return <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{t("accounts.statusActive")}</Badge>;
 }
 
-function StatusTooltip({ children, content }: { children: ReactNode; content: string }) {
+function formatAdditionalRefreshErrorDetails(account: AccountDTO): string | undefined {
+  const response = account.lastRefreshErrorResponse?.trim();
+  if (!response) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(response);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return response;
+    const details = { ...(parsed as Record<string, unknown>) };
+    const messages = new Set((account.lastRefreshErrorMessage ?? "").split(" · ").map((value) => value.trim()).filter(Boolean));
+    if (typeof details.error === "string" && details.error === account.lastRefreshErrorCode) delete details.error;
+    for (const key of ["error_description", "message", "detail", "description", "title"]) {
+      if (typeof details[key] === "string" && messages.has(details[key])) delete details[key];
+    }
+    if (details.error && typeof details.error === "object" && !Array.isArray(details.error)) {
+      const nested = { ...(details.error as Record<string, unknown>) };
+      if (typeof nested.code === "string" && nested.code === account.lastRefreshErrorCode) delete nested.code;
+      for (const key of ["error_description", "message", "detail", "description"]) {
+        if (typeof nested[key] === "string" && messages.has(nested[key])) delete nested[key];
+      }
+      if (Object.keys(nested).length === 0) delete details.error;
+      else details.error = nested;
+    }
+    if (Object.keys(details).length === 0) return undefined;
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return response;
+  }
+}
+
+function StatusTooltip({ children, content }: { children: ReactNode; content: ReactNode }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span tabIndex={0} className="inline-flex cursor-help">{children}</span>
       </TooltipTrigger>
-      <TooltipContent className="max-w-72">{content}</TooltipContent>
+      <TooltipContent className="w-max max-w-sm">{content}</TooltipContent>
     </Tooltip>
   );
 }

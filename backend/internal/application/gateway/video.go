@@ -108,7 +108,6 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		if err == nil {
 			err = ErrNoAvailableAccount
 		}
-
 		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
 	}
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
@@ -342,6 +341,12 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	defer lease.Release()
+	credential, err := s.accounts.EnsureCredential(ctx, lease.Credential, false)
+	if err != nil {
+		s.failVideoJob(parent, job, "account_unavailable", err)
+		return
+	}
+	lease.Credential = credential
 	adapter, ok := s.providers.Videos(route.Provider)
 	if !ok {
 		s.failVideoJob(parent, job, "provider_unavailable", ErrNoAvailableAccount)
