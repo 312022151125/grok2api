@@ -31,7 +31,6 @@ import (
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
-	neterrorpkg "github.com/chenyme/grok2api/backend/internal/pkg/neterror"
 	"github.com/chenyme/grok2api/backend/internal/repository"
 )
 
@@ -675,6 +674,50 @@ func routeTargetSeed(input Input) string {
 }
 
 // selectMediaRoute selects a same-name route that satisfies media capability, key permissions, and Provider support.
+
+// listMediaRoutes returns all routes that satisfy media capability, key permissions, and Provider support.
+func (s *Service) listMediaRoutes(routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, providerSupported func(accountdomain.Provider) bool) ([]modeldomain.Route, error) {
+	if len(routes) == 0 {
+		return nil, ErrModelNotFound
+	}
+	accountScope := key.AccountScope()
+	capabilityMatched := false
+	scopeMatched := false
+	allowed := false
+	eligible := make([]modeldomain.Route, 0, len(routes))
+	for _, route := range routes {
+		if route.Capability != capability {
+			continue
+		}
+		capabilityMatched = true
+		if !accountScope.AllowsProvider(route.Provider) {
+			continue
+		}
+		scopeMatched = true
+		if !s.clientKeys.CanUseModel(key, route.ID) {
+			continue
+		}
+		allowed = true
+		if providerSupported(route.Provider) {
+			eligible = append(eligible, route)
+		}
+	}
+	if len(eligible) > 0 {
+		return eligible, nil
+	}
+	if !capabilityMatched {
+		return nil, ErrModelNotFound
+	}
+	if !scopeMatched {
+		return nil, &SelectionUnavailableError{Reason: SelectionNoAccounts, Scope: accountScope}
+	}
+	if !allowed {
+		return nil, clientkeyapp.ErrModelNotAllowed
+	}
+	return nil, ErrNoAvailableAccount
+}
+
+
 func (s *Service) selectMediaRoute(routes []modeldomain.Route, key clientkey.Key, capability modeldomain.Capability, providerSupported func(accountdomain.Provider) bool) (modeldomain.Route, error) {
 	if len(routes) == 0 {
 		return modeldomain.Route{}, ErrModelNotFound
@@ -1410,10 +1453,6 @@ func isUpstreamStreamFailure(errorCode string) bool {
 	default:
 		return false
 	}
-}
-
-func isRetryableTransportFailure(providerValue accountdomain.Provider, err error) bool {
-	return providerValue != accountdomain.ProviderBuild || !neterrorpkg.IsResponseHeaderTimeout(err)
 }
 
 func isSSOCredentialRejected(err error, credential accountdomain.Credential) bool {
