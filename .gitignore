@@ -34,6 +34,10 @@ Thumbs.db
 *.coverprofile
 *.test
 
+# Python
+__pycache__/
+*.py[cod]
+
 # Frontend
 /.pnpm-store/
 /frontend/node_modules/
@@ -45,7 +49,9 @@ Thumbs.db
 /release/
 /.tmp/
 /tmp/
+/Dockerfile.local
 
+# Python virtual environments and cache
 .worktrees/
 venv/
 .venv/
@@ -61,11 +67,10 @@ build/
 .ruff_cache/
 *.so
 *.egg
+
+# Project specific
 .graphify/
 .graphify_*.json
 .graphify_python
 .claude/
-.worktrees/
-.vscode/
-.DS_Store
 graphify-out/

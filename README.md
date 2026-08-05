@@ -282,6 +282,41 @@ curl http://127.0.0.1:8000/v1/responses \
 | `provider` | Build/Web/Console 上游默认配置 |
 | `media` | 媒体存储驱动与路径 |
 
+### Egress and Proxy Configuration
+
+- HTTP, HTTPS, SOCKS4/4A, SOCKS5/5H, and Resin
+- Subscription and text/Base64 import
+- Batch probes, filtering, deletion, assignment, and balancing
+- Fallback per scope: none, direct, or a fixed node
+- Proxy-pool mode without global cooldown after one connection failure
+- Immediate recovery probes after fixed-proxy transport failures, with per-node coalescing and bounded waiting for fast retry
+- Optional [Egress Quality Guard](./tools/egress-quality-guard/README.md) for active per-node model probes, guarded quarantine, and recovery; enable it with the built-in `quality-guard` Compose profile
+
+To enable the guard, add a `qualityGuard` section to `config.yaml`, then start
+the profile. The main service creates and reuses a non-exportable system probe
+identity automatically:
+
+```yaml
+qualityGuard:
+  enabled: true
+  model: "grok-4.5"
+```
+
+```bash
+docker compose --profile quality-guard up -d --build
+```
+
+Existing preview deployments that still contain `clientKeyID` can upgrade
+directly. The field is accepted for compatibility but ignored and can be
+removed; any manually created probe key is intentionally left untouched.
+
+After changing this configuration, run `docker compose --profile quality-guard restart grok2api egress-quality-guard` to reload the base settings; policy edits made in the admin page still hot-reload.
+
+The normal `docker compose up -d` command does not start the guard or generate
+probe traffic. The sidecar receives a narrowly scoped internal credential from
+the main service and never stores or uses the administrator password. See the
+linked guide before enabling automatic quarantine.
+
 账号、模型、额度、审计、客户端密钥、媒体任务和运行设置始终保存在关系型数据库。Redis 用于限流、并发租约、粘滞路由、分布式锁、额度恢复事件和多实例设置通知。
 
 推荐组合：
@@ -333,6 +368,8 @@ Then select `FlareSolverr` under **Runtime Settings → Media & Network → Clea
 
 The egress layer retries only connection failures known to occur before request submission. It does not replay submitted generation requests, authentication failures, exhausted quotas, or upstream rate limits.
 
+When a fixed proxy enters cooldown after a transport failure, grok2api starts an independent connectivity probe immediately. Concurrent failures share one probe. A later request bound to that node waits for at most five seconds, reloads persisted node state after a healthy probe, and continues without waiting for the full cooldown. An unhealthy probe preserves the cooldown. Proxy-pool leases use fresh tunnels, so one rotating exit failure never cools the whole pool. See [Immediate egress failure probe and bounded retry](./backend/internal/infra/egress/FAILURE_RETRY.md) for the design and safety invariants.
+
 ## Configuration and deployment
 
 ## Build Super entitlement 与 XAI 推理回退
@@ -345,6 +382,24 @@ The egress layer retries only connection failures known to occur before request 
 - Free-first 调度不会把该类账号放入 Free 池；paid 筛选可查到，free 筛选查不到。
 - 模型能力归一化会本地确保 `grok-imagine-video-1.5`；`GET /models` 始终走 Build 主地址，entitlement 本身不触发 XAI。
 - 普通导入、upsert、token refresh、SSO 转换与重启不会清除该标记；仅显式 PATCH 可设置/清除。旧数据默认 `false`。
+
+### PostgreSQL Configuration
+
+PostgreSQL credentials can be injected without storing them in `config.yaml`:
+
+```bash
+GROK2API_DATABASE_URL='postgresql://user:password@host:5432/grok2api?sslmode=require' docker compose up -d
+```
+
+A non-empty `GROK2API_DATABASE_URL` overrides `database.postgres.dsn` and automatically selects the `postgres` driver. An empty value is ignored. Supported URL schemes are `postgres://` and `postgresql://`; SQLAlchemy's `postgresql+asyncpg://` form is rejected with a migration hint. The application does not implicitly read the generic `DATABASE_URL`; platforms that provide it can map it explicitly with `GROK2API_DATABASE_URL: "${DATABASE_URL}"`. Database configuration precedence is built-in defaults, `config.yaml`, then `GROK2API_DATABASE_URL`. The current CLI has no database override.
+
+Important optional settings:
+
+- `audit.ledgerMode`: `observe` reports ledger faults; `enforce` can pause new inference to protect billing integrity.
+- `routing.accountIsolatedConnections`: partitions outbound TCP/HTTP pools by account for external L4 or connection-hash load balancers. It is off by default because it increases connections, TLS handshakes, memory, and file-descriptor usage.
+- `routing.segmentedSelectorEnabled`: optimizes large account pools while retaining full-planner fallback and atomic guards.
+- Build response-header timeout and exact-match 403 invalidation rules are hot-reloadable.
+- **Sync latest version** applies the validated Grok Build client version and User-Agent.
 
 ### Build XAI 推理回退与视频上传
 
