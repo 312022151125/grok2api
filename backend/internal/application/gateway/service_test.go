@@ -956,7 +956,7 @@ func TestListConversationRoutesPreservesInputOrder(t *testing.T) {
 		{ID: 20, PublicID: "Console/grok-shared", Provider: account.ProviderConsole, UpstreamModel: "grok-shared"},
 		{ID: 10, PublicID: "Build/grok-shared", Provider: account.ProviderBuild, UpstreamModel: "grok-shared"},
 	}
-	eligible, err := service.listConversationRoutes(routes, clientkey.Key{}, audit.OperationResponses, "/responses", false, nil)
+	eligible, _, err := service.eligibleConversationRoutes(routes, clientkey.Key{}, audit.OperationResponses, "/responses", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
