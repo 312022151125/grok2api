@@ -399,7 +399,7 @@ func (h *Handler) generateImage(c *gin.Context) {
 		return
 	}
 	if value := bytes.TrimSpace(request.StorageOptions); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前兼容层暂不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current compatibility layer does not support storage_options")
 		return
 	}
 	count := 1
@@ -596,7 +596,7 @@ func (h *Handler) editImage(c *gin.Context) {
 		return
 	}
 	if value := bytes.TrimSpace(request.StorageOptions); len(value) > 0 && !bytes.Equal(value, []byte("null")) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前兼容层暂不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current compatibility layer does not support storage_options")
 		return
 	}
 	model := strings.TrimSpace(request.Model)
@@ -730,11 +730,11 @@ func (h *Handler) handleVideoCreate(c *gin.Context, operation, label string) {
 		return
 	}
 	if hasJSONValue(request.Output) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前兼容层暂不支持 output.upload_url")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current compatibility layer does not support output.upload_url")
 		return
 	}
 	if hasJSONValue(request.StorageOptions) {
-		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "当前兼容层暂不支持 storage_options")
+		writeOpenAIError(c, http.StatusBadRequest, "unsupported_parameter", "The current compatibility layer does not support storage_options")
 		return
 	}
 	model := strings.TrimSpace(request.Model)

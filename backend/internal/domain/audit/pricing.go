@@ -402,18 +402,34 @@ func EstimateOfficialVideoCost(model, resolution string, seconds, inputImages in
 	if !ok {
 		return PricingResult{}, false
 	}
+	normalized := normalizePricingModel(model)
 	resolution = strings.ToLower(strings.TrimSpace(resolution))
 	var ticksPerSecond, ticksPerInputImage int64
 	switch baseModel {
 	case "grok-imagine-video":
 		ticksPerInputImage = officialLiteImageInputTicks
-		switch resolution {
-		case "480p":
-			ticksPerSecond = 500_000_000
-		case "720p":
-			ticksPerSecond = 700_000_000
-		default:
-			return PricingResult{}, false
+		// grok-imagine-video-1.5-preview uses 1.5 rates but is stored under the
+		// base "grok-imagine-video" label (no version suffix in result model name).
+		if normalized == "grok-imagine-video-1.5-preview" {
+			switch resolution {
+			case "480p":
+				ticksPerSecond = 800_000_000
+			case "720p":
+				ticksPerSecond = 1_400_000_000
+			case "1080p":
+				ticksPerSecond = 2_500_000_000
+			default:
+				return PricingResult{}, false
+			}
+		} else {
+			switch resolution {
+			case "480p":
+				ticksPerSecond = 500_000_000
+			case "720p":
+				ticksPerSecond = 700_000_000
+			default:
+				return PricingResult{}, false
+			}
 		}
 	case "grok-imagine-video-1.5":
 		ticksPerInputImage = officialImageEditInputTicks

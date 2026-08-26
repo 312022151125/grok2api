@@ -696,11 +696,11 @@ func routeTargetScore(seed string, routeID uint64) uint64 {
 
 func routeProviderPriority(providerValue accountdomain.Provider) int {
 	switch providerValue {
-	case accountdomain.ProviderBuild:
-		return 0
-	case accountdomain.ProviderWeb:
-		return 1
 	case accountdomain.ProviderConsole:
+		return 0
+	case accountdomain.ProviderBuild:
+		return 1
+	case accountdomain.ProviderWeb:
 		return 2
 	default:
 		return 3
@@ -1055,6 +1055,15 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 		return nil, ErrNoAvailableAccount
 	}
 	physicalCallCtx := infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+	refreshRouteAdapter := func() bool {
+		newAdapter, newOK := s.providers.Responses(route.Provider)
+		if !newOK {
+			return false
+		}
+		adapter = newAdapter
+		physicalCallCtx = infraegress.WithPhysicalCallTrace(ctx, string(route.Provider), string(operation))
+		return true
+	}
 	supportsStoredResponses := s.providers.SupportsStoredResponses(route.Provider)
 	if input.PreviousResponseID != "" && !supportsStoredResponses {
 		return nil, ErrResponseStateUnsupported
@@ -1062,7 +1071,14 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	// A lease recovery probe stays on exactly one account and one rendered proxy
 	// identity. Retrying the same pinned account would provide neither failover
 	// nor new evidence and can multiply a slow/failing probe.
-	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0)
+	baseAttempts := int(s.maxAttempts.Load())
+	// For multi-route round-robin: each attempt round covers all eligible routes once.
+	// Scale the attempt budget so maxAttempts rounds × len(routes) individual account calls are allowed.
+	pinned := ownership != nil || input.ForcedAccountID != 0
+	if !pinned && len(orderedRoutes) > 1 {
+		baseAttempts *= len(orderedRoutes)
+	}
+	attemptPolicy := newRequestRoutingAttemptPolicy(baseAttempts, pinned)
 	idempotencyID, _ := security.NewOpaqueToken(18)
 	pricingModel := s.providers.PricingModel(route.Provider, route.UpstreamModel)
 	if err := s.checkLedgerReady(); err != nil {
@@ -1084,6 +1100,18 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	quotaProbeAttempted := false
 	selection := preselectedSession
+	// routeIdx tracks the current position in orderedRoutes for cross-provider failover.
+	routeIdx := 0
+	if len(orderedRoutes) > 0 {
+		for i, r := range orderedRoutes {
+			if r.ID == route.ID {
+				routeIdx = i
+				break
+			}
+		}
+	}
+	routeRoundStart := routeIdx
+	routeRoundProgressed := false
 	var lastErr error
 	var lastFailure *UpstreamFailure
 	failureAttempts := newFailureAttemptRecorder(http.MethodPost, path)
@@ -1271,6 +1299,22 @@ attemptLoop:
 		if qualityHoldEnabled && qualityAccountAttempts >= holdCfg.MaxAttempts {
 			break
 		}
+		// Round-robin: advance to the next route at the start of each attempt (after attempt 0).
+		if attempt > 0 && !pinned && len(orderedRoutes) > 1 {
+			nextIdx := (routeIdx + 1) % len(orderedRoutes)
+			nextRoute := orderedRoutes[nextIdx]
+			if nextRoute.ID != route.ID {
+				routeIdx = nextIdx
+				route = nextRoute
+				quotaMode = s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+				selection = nil
+				refreshRouteAdapter()
+				auditBase.ModelRouteID = route.ID
+				auditBase.ModelPublicID = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
+				auditBase.ModelUpstreamModel = modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel)
+				auditBase.Provider = string(route.Provider)
+			}
+		}
 		var lease *accountLease
 		var err error
 		selectionStarted := time.Now()
@@ -1302,11 +1346,66 @@ attemptLoop:
 		}
 		timing.markSelection(time.Since(selectionStarted))
 		if err != nil {
-			if lastFailure == nil {
-				lastErr = err
+			// Account pool for current route exhausted. Hop to next route (cross-provider failover / round-robin).
+			if ownership == nil && input.ForcedAccountID == 0 && input.ForcedEgressNodeID == 0 && len(orderedRoutes) > 1 {
+				housed := false
+				tryHop := func(fromIdx int, resetRound bool) bool {
+					for i := fromIdx; i < len(orderedRoutes); i++ {
+						nextRoute := orderedRoutes[i]
+						nextSession, sessionErr := s.selector.beginSelectionSessionForKey(
+							ctx, nextRoute.Provider, nextRoute.ID, nextRoute.UpstreamModel,
+							s.providers.QuotaMode(nextRoute.Provider, nextRoute.UpstreamModel),
+							affinityKey, nil, !quotaProbeAttempted, accountScope,
+						)
+						if sessionErr == nil {
+							nextLease, nextErr := nextSession.Acquire(ctx, nil, !quotaProbeAttempted)
+							if nextErr == nil {
+								routeIdx = i
+								route = nextRoute
+								quotaMode = s.providers.QuotaMode(route.Provider, route.UpstreamModel)
+								selection = nextSession
+								excluded = make(map[uint64]bool)
+								excluded[nextLease.Credential.ID] = true
+								if !refreshRouteAdapter() {
+									nextLease.Release()
+									continue
+								}
+								lease = nextLease
+								err = nil
+								if resetRound {
+									routeRoundProgressed = false
+								}
+								auditBase.ModelRouteID = route.ID
+								auditBase.ModelPublicID = modeldomain.ExternalPublicID(route.Provider, route.PublicID)
+								auditBase.ModelUpstreamModel = modeldomain.DisplayUpstreamModel(route.Provider, route.UpstreamModel)
+								auditBase.Provider = string(route.Provider)
+								return true
+							}
+						}
+					}
+					return false
+				}
+				housed = tryHop(routeIdx+1, false)
+				if !housed && routeRoundProgressed {
+					housed = tryHop(routeRoundStart, true)
+				}
+				if !housed {
+					if lastFailure == nil {
+						lastErr = err
+					}
+					break
+				}
+				// A successful hop to a new route does not consume an attempt slot.
+				// Only actual upstream account requests count towards maxAttempts (round budget).
+				attempt--
+			} else {
+				if lastFailure == nil {
+					lastErr = err
+				}
+				break
 			}
-			break
 		}
+		routeRoundProgressed = true
 		excluded[lease.Credential.ID] = true
 		if limited, ok := s.activeTeamModelRateLimit(lease.Credential, route.UpstreamModel, time.Now().UTC()); ok {
 			lease.Release()
@@ -1835,10 +1934,6 @@ func upstreamResponseErrorHealthPenalty(err error, idleCooldown time.Duration) (
 // successful request even though its HTTP status remains 2xx.
 func auditRequestSucceeded(statusCode int, errorCode string) bool {
 	return statusCode >= 200 && statusCode < 300 && errorCode == ""
-}
-
-func isRetryableTransportFailure(providerValue accountdomain.Provider, err error) bool {
-	return providerValue != accountdomain.ProviderBuild || !neterrorpkg.IsResponseHeaderTimeout(err)
 }
 
 func isSSOCredentialRejected(err error, credential accountdomain.Credential) bool {

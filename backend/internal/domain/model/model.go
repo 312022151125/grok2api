@@ -171,8 +171,10 @@ func PublicIDCandidateGroups(value string) [][]string {
 			return [][]string{{literal}, {qualified}}
 		}
 	}
-	group := make([]string, 0, len(account.Providers()))
-	for _, providerValue := range account.Providers() {
+	// Failover order for bare names: Console → Build → Web.
+	failoverOrder := []account.Provider{account.ProviderConsole, account.ProviderBuild, account.ProviderWeb}
+	group := make([]string, 0, len(failoverOrder))
+	for _, providerValue := range failoverOrder {
 		if normalized, ok := NormalizePublicID(providerValue, value); ok {
 			group = append(group, normalized)
 		}
