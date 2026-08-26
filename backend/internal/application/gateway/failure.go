@@ -124,6 +124,13 @@ func newHTTPUpstreamFailure(status int, body []byte, accountID uint64, accountNa
 	case http.StatusForbidden:
 		failure.Code = "upstream_forbidden"
 		failure.PublicMessage = "The upstream service rejected the request"
+		// Console's DPoP requirement is an upstream auth-scheme rollout, not a
+		// property of the selected SSO account. Rotating accounts or browser
+		// egress cannot make the same Bearer-anonymous request valid.
+		if isDPoPProofRequired(upstreamCode) {
+			failure.RequestScopedForbidden = true
+			break
+		}
 		// Safety denials are request-scoped: inspect both structured metadata and the raw body
 		// so SAFETY_CHECK_TYPE_* markers still match when they only appear in nested text.
 		if isSafetyRejection(metadataText) || isSafetyRejection(string(body)) {
@@ -171,6 +178,12 @@ func newTransportUpstreamFailure(err error, accountID uint64, accountName string
 	status := http.StatusBadGateway
 	if neterrorpkg.IsResponseHeaderTimeout(err) {
 		status, code, message = http.StatusGatewayTimeout, "upstream_header_timeout", "Upstream response header timed out"
+	} else if neterrorpkg.IsUpstreamStreamIdleTimeout(err) {
+		status, code, message = http.StatusGatewayTimeout, "upstream_stream_idle_timeout", "Upstream stream idle timeout"
+	} else if neterrorpkg.IsUpstreamResponseEmpty(err) {
+		status, code, message = http.StatusBadGateway, "upstream_response_empty", "Upstream response was empty"
+	} else if errors.Is(err, errQualityEmptyStream) {
+		status, code, message = http.StatusBadGateway, "upstream_stream_empty", "Upstream stream response was empty"
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		code, message = "upstream_timeout", "Upstream service timed out"
 	}
@@ -239,6 +252,10 @@ func isRequestScopedForbidden(upstreamCode, text string) bool {
 		"zero data retention", "zdr-blocked", "zdr blocked", "zdr-gated", "zdr gated",
 		"operation is unavailable under zdr", "operation unavailable under zdr",
 	)
+}
+
+func isDPoPProofRequired(upstreamCode string) bool {
+	return provider.IsDPoPProofRequiredText(upstreamCode)
 }
 
 func isDefinitiveAccountBlock(text string) bool {
