@@ -19,7 +19,7 @@ import (
 	egressapp "github.com/chenyme/grok2api/backend/internal/application/egress"
 	accountdomain "github.com/chenyme/grok2api/backend/internal/domain/account"
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
-	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cli"
+	cliprovider "github.com/chenyme/grok2api/backend/internal/infra/provider/cliproxyexport"
 	"github.com/chenyme/grok2api/backend/internal/infra/security"
 	"github.com/chenyme/grok2api/backend/internal/pkg/batch"
 	"github.com/chenyme/grok2api/backend/internal/pkg/perfmetrics"
