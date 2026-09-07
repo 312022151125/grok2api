@@ -1074,7 +1074,12 @@ func (s *Service) createResponseAt(ctx context.Context, input Input, path string
 	holdCfg := s.qualityRetryConfig()
 	qualityHoldEnabled := shouldHoldQualityStream(input, ownership, route, operation, holdCfg)
 	qualityCrossAccountReplay := canReplayQualityHoldAcrossAccounts(input, ownership)
-	attemptPolicy := newRequestRoutingAttemptPolicy(int(s.maxAttempts.Load()), ownership != nil || input.ForcedAccountID != 0)
+	pinned := ownership != nil || input.ForcedAccountID != 0
+	baseAttempts := int(s.maxAttempts.Load())
+	if !pinned && len(orderedRoutes) > 1 {
+		baseAttempts *= len(orderedRoutes)
+	}
+	attemptPolicy := newRequestRoutingAttemptPolicy(baseAttempts, pinned)
 	idempotencyID, _ := security.NewOpaqueToken(18)
 	pricingModel := s.providers.PricingModel(route.Provider, route.UpstreamModel)
 	if err := s.checkLedgerReady(); err != nil {
@@ -1380,16 +1385,15 @@ attemptLoop:
 				if lastFailure == nil {
 					lastErr = err
 				}
+				pinnedID := uint64(0)
+				if ownership != nil {
+					pinnedID = ownership.AccountID
+				} else if input.ForcedAccountID != 0 {
+					pinnedID = input.ForcedAccountID
+				}
+				failureAttempts.captureSelectionFailure(pinnedID, "", err)
 				break
 			}
-			pinnedID := uint64(0)
-			if ownership != nil {
-				pinnedID = ownership.AccountID
-			} else if input.ForcedAccountID != 0 {
-				pinnedID = input.ForcedAccountID
-			}
-			failureAttempts.captureSelectionFailure(pinnedID, "", err)
-			break
 		}
 		routeRoundProgressed = true
 		excluded[lease.Credential.ID] = true
